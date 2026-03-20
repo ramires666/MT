@@ -1,0 +1,34 @@
+{
+  "broker": "bybit_mt5",
+  "timeframe": "M15",
+  "started_at": "2026-01-01T00:00:00+00:00",
+  "ended_at": "2026-03-19T14:18:21+00:00",
+  "universe_mode": "group",
+  "normalized_group": "commodities",
+  "symbols": [],
+  "created_at": "2026-03-19T14:19:07.973766+00:00",
+  "summary": {
+    "total_symbols_requested": 12,
+    "loaded_symbols": 12,
+    "prefiltered_i1_symbols": 11,
+    "total_pairs_evaluated": 55,
+    "threshold_passed_pairs": 3,
+    "screened_out_pairs": 1
+  },
+  "universe_symbols": [
+    "GASOIL-C",
+    "GS",
+    "NG-C",
+    "UKOUSD",
+    "USOUSD",
+    "WPM",
+    "XAGAUD",
+    "XAGUSD",
+    "XAUAUD+",
+    "XAUEUR+",
+    "XAUJPY+",
+    "XAUUSD+"
+  ],
+  "all_pairs_path": "data\\scans\\bybit_mt5\\johansen\\M15\\20260101T000000Z_20260319T141821Z\\commodities\\20260319T141907Z\\all_pairs.parquet",
+  "passed_pairs_path": "data\\scans\\bybit_mt5\\johansen\\M15\\20260101T000000Z_20260319T141821Z\\commodities\\20260319T141907Z\\passed_pairs.parquet"
+}

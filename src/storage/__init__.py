@@ -1,0 +1,1 @@
+"""Persistence layer contracts and adapters."""
