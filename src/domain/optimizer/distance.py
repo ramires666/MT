@@ -4,7 +4,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass
 from itertools import product
-from math import sqrt
+from math import log, sqrt
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -27,6 +27,7 @@ OBJECTIVE_METRICS = (
     "pnl_to_maxdd",
     "omega_ratio",
     "k_ratio",
+    "score_log_trades",
     "ulcer_index",
     "ulcer_performance",
 )
@@ -63,6 +64,7 @@ class DistanceOptimizationRow:
     pnl_to_maxdd: float
     omega_ratio: float
     k_ratio: float
+    score_log_trades: float
     ulcer_index: float
     ulcer_performance: float
     trades: int
@@ -221,6 +223,7 @@ def _equity_metrics(result: DistanceBacktestResult) -> dict[str, float]:
             "pnl_to_maxdd": 0.0,
             "omega_ratio": 0.0,
             "k_ratio": 0.0,
+            "score_log_trades": 0.0,
             "ulcer_index": 0.0,
             "ulcer_performance": 0.0,
             "gross_profit": 0.0,
@@ -230,6 +233,7 @@ def _equity_metrics(result: DistanceBacktestResult) -> dict[str, float]:
             "total_cost": 0.0,
         }
 
+    trades = int(result.summary.get("trades", 0) or 0)
     net_profit = float(result.summary.get("net_pnl", 0.0) or 0.0)
     ending_equity = float(result.summary.get("ending_equity", equity[-1]) or equity[-1])
     running_peak = np.maximum.accumulate(equity)
@@ -241,6 +245,7 @@ def _equity_metrics(result: DistanceBacktestResult) -> dict[str, float]:
     gains = float(np.clip(pnl_steps, 0.0, None).sum())
     losses = float(np.clip(-pnl_steps, 0.0, None).sum())
     omega_ratio = gains if losses <= 1e-12 else gains / losses
+    score_log_trades = pnl_to_maxdd * log(1.0 + max(0, trades))
 
     dd_pct = np.divide(drawdown_abs, running_peak, out=np.zeros_like(drawdown_abs), where=running_peak > 1e-12)
     ulcer_index = float(np.sqrt(np.mean(dd_pct**2))) if dd_pct.size else 0.0
@@ -253,6 +258,7 @@ def _equity_metrics(result: DistanceBacktestResult) -> dict[str, float]:
         "pnl_to_maxdd": pnl_to_maxdd,
         "omega_ratio": float(omega_ratio),
         "k_ratio": _compute_k_ratio(equity),
+        "score_log_trades": float(score_log_trades),
         "ulcer_index": ulcer_index,
         "ulcer_performance": ulcer_performance,
         "gross_profit": float(result.summary.get("gross_pnl", 0.0) or 0.0),
@@ -348,6 +354,7 @@ def _evaluate_params(
         pnl_to_maxdd=float(metrics["pnl_to_maxdd"]),
         omega_ratio=float(metrics["omega_ratio"]),
         k_ratio=float(metrics["k_ratio"]),
+        score_log_trades=float(metrics["score_log_trades"]),
         ulcer_index=float(metrics["ulcer_index"]),
         ulcer_performance=float(metrics["ulcer_performance"]),
         trades=int(result.summary.get("trades", 0) or 0),

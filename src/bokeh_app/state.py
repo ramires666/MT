@@ -6,19 +6,20 @@ from bokeh.models import ColumnDataSource, Range1d
 
 
 def _empty_price_source() -> ColumnDataSource:
-    return ColumnDataSource({"time": [], "price": []})
+    return ColumnDataSource({"x": [], "time": [], "price": []})
 
 
 def _empty_spread_source() -> ColumnDataSource:
-    return ColumnDataSource({"time": [], "spread": []})
+    return ColumnDataSource({"x": [], "time": [], "spread": []})
 
 
 def _empty_zscore_source() -> ColumnDataSource:
-    return ColumnDataSource({"time": [], "zscore": [], "upper": [], "lower": []})
+    return ColumnDataSource({"x": [], "time": [], "zscore": [], "upper": [], "lower": []})
 
 
 def _empty_equity_source() -> ColumnDataSource:
     return ColumnDataSource({
+        "x": [],
         "time": [],
         "total": [],
         "leg1": [],
@@ -35,6 +36,8 @@ def _empty_trades_source() -> ColumnDataSource:
             "trade_id": [],
             "entry_time": [],
             "exit_time": [],
+            "entry_x": [],
+            "exit_x": [],
             "spread_side": [],
             "lots_1": [],
             "lots_2": [],
@@ -53,11 +56,11 @@ def _empty_trades_source() -> ColumnDataSource:
 
 
 def _empty_trade_markers_source() -> ColumnDataSource:
-    return ColumnDataSource({"time": [], "price": [], "marker": [], "event": []})
+    return ColumnDataSource({"x": [], "time": [], "price": [], "marker": [], "event": []})
 
 
 def _empty_selected_trade_markers_source() -> ColumnDataSource:
-    return ColumnDataSource({"time": [], "price": []})
+    return ColumnDataSource({"x": [], "time": [], "price": []})
 
 
 def _empty_trade_segments_source() -> ColumnDataSource:
@@ -71,13 +74,30 @@ def _empty_optimization_source() -> ColumnDataSource:
             "objective_metric": [],
             "objective_score": [],
             "net_profit": [],
+            "net_profit_display": [],
+            "net_profit_bg": [],
             "ending_equity": [],
+            "ending_equity_display": [],
+            "ending_equity_bg": [],
             "max_drawdown": [],
+            "max_drawdown_display": [],
+            "max_drawdown_bg": [],
             "pnl_to_maxdd": [],
+            "pnl_to_maxdd_display": [],
+            "pnl_to_maxdd_bg": [],
             "omega_ratio": [],
+            "omega_ratio_display": [],
+            "omega_ratio_bg": [],
             "k_ratio": [],
+            "k_ratio_display": [],
+            "k_ratio_bg": [],
+            "score_log_trades": [],
             "ulcer_index": [],
+            "ulcer_index_display": [],
+            "ulcer_index_bg": [],
             "ulcer_performance": [],
+            "ulcer_performance_display": [],
+            "ulcer_performance_bg": [],
             "gross_profit": [],
             "spread_cost": [],
             "slippage_cost": [],

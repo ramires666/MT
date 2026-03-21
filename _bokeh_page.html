@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>MT Pair Tester</title>
+    <style>
+      html, body {
+        box-sizing: border-box;
+        display: flow-root;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+    </style>
+    <script type="text/javascript" src="/static/js/bokeh.min.js?v=7b53bd5c9e3da7dab0a6954653d5ff549d082f58d03eafe7e0b956b690138e3788c99fc68ad65e005b304417171f0369d8f3a2fc678ad79d9a58890a7e656baf"></script>
+    <script type="text/javascript" src="/static/js/bokeh-gl.min.js?v=816a79e3054f2ba60bc1ba14d12e24d0a6c7a5773b746f6bc2057047d5fe3b967f94f9bd60c566dd6184f7aed06521d98deeb543898aea36be5bdce96f0c0694"></script>
+    <script type="text/javascript" src="/static/js/bokeh-widgets.min.js?v=9ece2ef757e8281ec1372542fb2fcabd38460065fdb29be4682587917bd67516d15c9b398ad70620080934d59a763223ba6069c3ee8d03a09fb08d8ebb435f53"></script>
+    <script type="text/javascript" src="/static/js/bokeh-tables.min.js?v=50f1ccbcf20d8033ebcc96033f03ef3abe7eb65cfaae8f917f3f33cf198a5aedd3ffb9ea68b84bbff1b1c42c85498346ccf564bbf08e840d4c8a44cad8817e70"></script>
+    <script type="text/javascript" src="/static/js/bokeh-mathjax.min.js?v=caaaa8302d8f3f6239e9154befd916d02450bb738eab01d46f68724b03d757b83085c7ef1eb77fc4e1fe0361072230b13c0673ffb57d7b220848f4095536640b"></script>
+    <script type="text/javascript">
+        Bokeh.set_log_level("info");
+    </script>
+  </head>
+  <body>
+    <div id="8b33aaa0-604f-421d-8321-cba050115014" data-root-id="p1933" style="display: contents;"></div>
+  
+    <script type="application/json" id="e086e63a-0e5b-40ae-9a8a-a66cd421973c">
+      {}
+    </script>
+    <script type="text/javascript">
+      (function() {
+        const fn = function() {
+          Bokeh.safely(function() {
+            (function(root) {
+              function embed_document(root) {
+              const docs_json = document.getElementById('e086e63a-0e5b-40ae-9a8a-a66cd421973c').textContent;
+              const render_items = [{"token":"eyJzZXNzaW9uX2lkIjogIkpuQTF0alJUc2szMHhnRWQ1eFR3bklMRzJLWVg2OURuSmlWckhXYktGS3l4IiwgInNlc3Npb25fZXhwaXJ5IjogMTc3NDEwNDgzMSwgIl9fYmtfX3psaWJfIjogImVOcEZqbDBMZ2tBUVJmX0tNazhGdWEyU0J2b2t2UVJSUkJfMHZPaWdTOXRPN0dwQzRuOXZOYUszT2Zkd2g5dERqYkpFNnlCbFBWd2QyaUN2MERRZVlVOXZwYlZjeGx5dzJVMlpranJIRHBlTV9XOFdDaTR5WnR2Z2RKM184aU4xYU04MWF1MnJJWS1TVUFpLVhpVVJMQmhzeVUzUE5SVlMxeDdTV0loa05Cc3lCb3RHa1JuOUR2RVo1RnE5RUFZdkM2Szd3bW5saU5KVzdjUFBfQWJEQi1RNFBibyJ9","roots":{"p1933":"8b33aaa0-604f-421d-8321-cba050115014"},"root_ids":["p1933"],"use_for_title":true}];
+              root.Bokeh.embed.embed_items(docs_json, render_items);
+              }
+              if (root.Bokeh !== undefined) {
+                embed_document(root);
+              } else {
+                let attempts = 0;
+                const timer = setInterval(function(root) {
+                  if (root.Bokeh !== undefined) {
+                    clearInterval(timer);
+                    embed_document(root);
+                  } else {
+                    attempts++;
+                    if (attempts > 100) {
+                      clearInterval(timer);
+                      console.log("Bokeh: ERROR: Unable to run BokehJS code because BokehJS library is missing");
+                    }
+                  }
+                }, 10, root)
+              }
+            })(window);
+          });
+        };
+        if (document.readyState != "loading") fn();
+        else document.addEventListener("DOMContentLoaded", fn);
+      })();
+    </script>
+  </body>
+</html>

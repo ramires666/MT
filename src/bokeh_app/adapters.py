@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from bisect import bisect_left
+from datetime import datetime
 from typing import Any
 
 from domain.backtest.distance import DistanceBacktestResult
@@ -10,15 +11,17 @@ from domain.scan.johansen import JohansenUniverseScanResult
 
 def empty_backtest_sources() -> dict[str, dict[str, list[Any]]]:
     return {
-        "price_1": {"time": [], "price": []},
-        "price_2": {"time": [], "price": []},
-        "spread": {"time": [], "spread": []},
-        "zscore": {"time": [], "zscore": [], "upper": [], "lower": []},
-        "equity": {"time": [], "total": [], "leg1": [], "leg2": [], "drawdown": [], "drawdown_top": [], "drawdown_width": []},
+        "price_1": {"x": [], "time": [], "price": []},
+        "price_2": {"x": [], "time": [], "price": []},
+        "spread": {"x": [], "time": [], "spread": []},
+        "zscore": {"x": [], "time": [], "zscore": [], "upper": [], "lower": []},
+        "equity": {"x": [], "time": [], "total": [], "leg1": [], "leg2": [], "drawdown": [], "drawdown_top": [], "drawdown_width": []},
         "trades": {
             "trade_id": [],
             "entry_time": [],
             "exit_time": [],
+            "entry_x": [],
+            "exit_x": [],
             "spread_side": [],
             "lots_1": [],
             "lots_2": [],
@@ -33,8 +36,8 @@ def empty_backtest_sources() -> dict[str, dict[str, list[Any]]]:
             "exit_price_2": [],
             "exit_reason": [],
         },
-        "markers_1": {"time": [], "price": [], "marker": [], "event": []},
-        "markers_2": {"time": [], "price": [], "marker": [], "event": []},
+        "markers_1": {"x": [], "time": [], "price": [], "marker": [], "event": []},
+        "markers_2": {"x": [], "time": [], "price": [], "marker": [], "event": []},
         "segments_1": {"x0": [], "y0": [], "x1": [], "y1": []},
         "segments_2": {"x0": [], "y0": [], "x1": [], "y1": []},
     }
@@ -47,29 +50,51 @@ def _trade_marker_shape(leg_side: str, event: str) -> str:
     return "inverted_triangle" if is_long else "triangle"
 
 
+def _lookup_bar_x(times: list[datetime], target: datetime) -> float:
+    if not times:
+        return 0.0
+    position = bisect_left(times, target)
+    if position <= 0:
+        return 0.0
+    if position >= len(times):
+        return float(len(times) - 1)
+    previous = times[position - 1]
+    current = times[position]
+    if abs((target - previous).total_seconds()) <= abs((current - target).total_seconds()):
+        return float(position - 1)
+    return float(position)
+
+
 def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, list[Any]]]:
     frame = result.frame
     trades = result.trades
 
+    times = frame.get_column("time").to_list()
+    x_values = [float(index) for index in range(len(times))]
+    time_to_x = {moment: x_values[index] for index, moment in enumerate(times)}
+
     price_1 = {
-        "time": frame.get_column("time").to_list(),
+        "x": x_values,
+        "time": times,
         "price": frame.get_column("close_1").to_list(),
     }
     price_2 = {
-        "time": frame.get_column("time").to_list(),
+        "x": x_values,
+        "time": times,
         "price": frame.get_column("close_2").to_list(),
     }
     spread = {
-        "time": frame.get_column("time").to_list(),
+        "x": x_values,
+        "time": times,
         "spread": frame.get_column("spread").to_list(),
     }
     zscore = {
-        "time": frame.get_column("time").to_list(),
+        "x": x_values,
+        "time": times,
         "zscore": frame.get_column("zscore").to_list(),
         "upper": frame.get_column("zscore_upper").to_list(),
         "lower": frame.get_column("zscore_lower").to_list(),
     }
-    equity_times = frame.get_column("time").to_list()
     equity_total = [float(value) for value in frame.get_column("equity_total").to_list()]
     equity_leg_1 = [float(value) for value in frame.get_column("equity_leg_1").to_list()]
     equity_leg_2 = [float(value) for value in frame.get_column("equity_leg_2").to_list()]
@@ -79,34 +104,23 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
         running_peak = max(running_peak, value)
         drawdown.append(value - running_peak)
 
-    time_ms: list[float] = []
-    for moment in equity_times:
-        current = moment if isinstance(moment, datetime) and moment.tzinfo else moment.replace(tzinfo=UTC)
-        time_ms.append(current.timestamp() * 1000.0)
-    default_width = 300000.0
-    drawdown_width: list[float] = []
-    if len(time_ms) <= 1:
-        drawdown_width = [default_width] * len(time_ms)
-    else:
-        raw_widths = [max(1.0, time_ms[index + 1] - time_ms[index]) for index in range(len(time_ms) - 1)]
-        sorted_widths = sorted(raw_widths)
-        median_width = sorted_widths[len(sorted_widths) // 2] * 0.82
-        drawdown_width = [median_width] * len(time_ms)
-
     equity = {
-        "time": equity_times,
+        "x": x_values,
+        "time": times,
         "total": equity_total,
         "leg1": equity_leg_1,
         "leg2": equity_leg_2,
         "drawdown": drawdown,
-        "drawdown_top": [0.0] * len(equity_times),
-        "drawdown_width": drawdown_width,
+        "drawdown_top": [0.0] * len(times),
+        "drawdown_width": [0.82] * len(times),
     }
 
     trades_rows = {
         "trade_id": [],
         "entry_time": [],
         "exit_time": [],
+        "entry_x": [],
+        "exit_x": [],
         "spread_side": [],
         "lots_1": [],
         "lots_2": [],
@@ -121,14 +135,16 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
         "exit_price_2": [],
         "exit_reason": [],
     }
-    markers_1 = {"time": [], "price": [], "marker": [], "event": []}
-    markers_2 = {"time": [], "price": [], "marker": [], "event": []}
+    markers_1 = {"x": [], "time": [], "price": [], "marker": [], "event": []}
+    markers_2 = {"x": [], "time": [], "price": [], "marker": [], "event": []}
     segments_1 = {"x0": [], "y0": [], "x1": [], "y1": []}
     segments_2 = {"x0": [], "y0": [], "x1": [], "y1": []}
 
     for trade_id, trade in enumerate(trades.to_dicts(), start=1):
         entry_time = trade["entry_time"]
         exit_time = trade["exit_time"]
+        entry_x = float(time_to_x.get(entry_time, _lookup_bar_x(times, entry_time)))
+        exit_x = float(time_to_x.get(exit_time, _lookup_bar_x(times, exit_time)))
         entry_price_1 = float(trade["entry_price_1"])
         exit_price_1 = float(trade["exit_price_1"])
         entry_price_2 = float(trade["entry_price_2"])
@@ -137,6 +153,8 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
         trades_rows["trade_id"].append(trade_id)
         trades_rows["entry_time"].append(entry_time)
         trades_rows["exit_time"].append(exit_time)
+        trades_rows["entry_x"].append(entry_x)
+        trades_rows["exit_x"].append(exit_x)
         trades_rows["spread_side"].append(trade["spread_side"])
         trades_rows["lots_1"].append(round(float(trade["lots_1"]), 4))
         trades_rows["lots_2"].append(round(float(trade["lots_2"]), 4))
@@ -151,6 +169,7 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
         trades_rows["exit_price_2"].append(exit_price_2)
         trades_rows["exit_reason"].append(trade["exit_reason"])
 
+        markers_1["x"].extend([entry_x, exit_x])
         markers_1["time"].extend([entry_time, exit_time])
         markers_1["price"].extend([entry_price_1, exit_price_1])
         markers_1["marker"].extend([
@@ -158,11 +177,12 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
             _trade_marker_shape(str(trade.get("leg_1_side", "long")), "exit"),
         ])
         markers_1["event"].extend(["entry", "exit"])
-        segments_1["x0"].append(entry_time)
+        segments_1["x0"].append(entry_x)
         segments_1["y0"].append(entry_price_1)
-        segments_1["x1"].append(exit_time)
+        segments_1["x1"].append(exit_x)
         segments_1["y1"].append(exit_price_1)
 
+        markers_2["x"].extend([entry_x, exit_x])
         markers_2["time"].extend([entry_time, exit_time])
         markers_2["price"].extend([entry_price_2, exit_price_2])
         markers_2["marker"].extend([
@@ -170,9 +190,9 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
             _trade_marker_shape(str(trade.get("leg_2_side", "long")), "exit"),
         ])
         markers_2["event"].extend(["entry", "exit"])
-        segments_2["x0"].append(entry_time)
+        segments_2["x0"].append(entry_x)
         segments_2["y0"].append(entry_price_2)
-        segments_2["x1"].append(exit_time)
+        segments_2["x1"].append(exit_x)
         segments_2["y1"].append(exit_price_2)
 
     return {
@@ -188,6 +208,34 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
         "segments_2": segments_2,
     }
 
+def _blend_channel(start: int, end: int, ratio: float) -> int:
+    return int(round(start + (end - start) * ratio))
+
+
+def _soft_metric_backgrounds(values: list[float | int | None], *, higher_is_better: bool = True) -> list[str]:
+    clean = [float(value) for value in values if value is not None]
+    if not clean:
+        return ["transparent"] * len(values)
+    low = min(clean)
+    high = max(clean)
+    if abs(high - low) <= 1e-12:
+        return ["rgba(0,0,0,0)"] * len(values)
+    bad = (254, 242, 242)
+    good = (236, 253, 245)
+    colors: list[str] = []
+    for value in values:
+        if value is None:
+            colors.append("transparent")
+            continue
+        ratio = (float(value) - low) / (high - low)
+        if not higher_is_better:
+            ratio = 1.0 - ratio
+        red = _blend_channel(bad[0], good[0], ratio)
+        green = _blend_channel(bad[1], good[1], ratio)
+        blue = _blend_channel(bad[2], good[2], ratio)
+        colors.append(f"rgb({red}, {green}, {blue})")
+    return colors
+
 
 def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[str, list[Any]]:
     rows = {
@@ -195,13 +243,30 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         "objective_metric": [],
         "objective_score": [],
         "net_profit": [],
+        "net_profit_display": [],
+        "net_profit_bg": [],
         "ending_equity": [],
+        "ending_equity_display": [],
+        "ending_equity_bg": [],
         "max_drawdown": [],
+        "max_drawdown_display": [],
+        "max_drawdown_bg": [],
         "pnl_to_maxdd": [],
+        "pnl_to_maxdd_display": [],
+        "pnl_to_maxdd_bg": [],
         "omega_ratio": [],
+        "omega_ratio_display": [],
+        "omega_ratio_bg": [],
         "k_ratio": [],
+        "k_ratio_display": [],
+        "k_ratio_bg": [],
+        "score_log_trades": [],
         "ulcer_index": [],
+        "ulcer_index_display": [],
+        "ulcer_index_bg": [],
         "ulcer_performance": [],
+        "ulcer_performance_display": [],
+        "ulcer_performance_bg": [],
         "gross_profit": [],
         "spread_cost": [],
         "slippage_cost": [],
@@ -216,18 +281,38 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         "stop_z_label": [],
         "bollinger_k": [],
     }
+    metric_values = {
+        "net_profit": [],
+        "ending_equity": [],
+        "max_drawdown": [],
+        "pnl_to_maxdd": [],
+        "omega_ratio": [],
+        "k_ratio": [],
+        "score_log_trades": [],
+        "ulcer_index": [],
+        "ulcer_performance": [],
+    }
     for row in result.rows:
         rows["trial_id"].append(row.trial_id)
         rows["objective_metric"].append(row.objective_metric)
         rows["objective_score"].append(row.objective_score)
         rows["net_profit"].append(row.net_profit)
+        rows["net_profit_display"].append(f"{float(row.net_profit):.2f}")
         rows["ending_equity"].append(row.ending_equity)
+        rows["ending_equity_display"].append(f"{float(row.ending_equity):.2f}")
         rows["max_drawdown"].append(row.max_drawdown)
+        rows["max_drawdown_display"].append(f"{float(row.max_drawdown):.2f}")
         rows["pnl_to_maxdd"].append(row.pnl_to_maxdd)
+        rows["pnl_to_maxdd_display"].append(f"{float(row.pnl_to_maxdd):.3f}")
         rows["omega_ratio"].append(row.omega_ratio)
+        rows["omega_ratio_display"].append(f"{float(row.omega_ratio):.3f}")
         rows["k_ratio"].append(row.k_ratio)
+        rows["k_ratio_display"].append(f"{float(row.k_ratio):.3f}")
+        rows["score_log_trades"].append(row.score_log_trades)
         rows["ulcer_index"].append(row.ulcer_index)
+        rows["ulcer_index_display"].append(f"{float(row.ulcer_index):.4f}")
         rows["ulcer_performance"].append(row.ulcer_performance)
+        rows["ulcer_performance_display"].append(f"{float(row.ulcer_performance):.3f}")
         rows["gross_profit"].append(row.gross_profit)
         rows["spread_cost"].append(row.spread_cost)
         rows["slippage_cost"].append(row.slippage_cost)
@@ -241,6 +326,24 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         rows["stop_z"].append(row.stop_z)
         rows["stop_z_label"].append("disabled" if row.stop_z is None else f"{float(row.stop_z):.1f}")
         rows["bollinger_k"].append(row.bollinger_k)
+        metric_values["net_profit"].append(row.net_profit)
+        metric_values["ending_equity"].append(row.ending_equity)
+        metric_values["max_drawdown"].append(row.max_drawdown)
+        metric_values["pnl_to_maxdd"].append(row.pnl_to_maxdd)
+        metric_values["omega_ratio"].append(row.omega_ratio)
+        metric_values["k_ratio"].append(row.k_ratio)
+        metric_values["score_log_trades"].append(row.score_log_trades)
+        metric_values["ulcer_index"].append(row.ulcer_index)
+        metric_values["ulcer_performance"].append(row.ulcer_performance)
+
+    rows["net_profit_bg"] = _soft_metric_backgrounds(metric_values["net_profit"], higher_is_better=True)
+    rows["ending_equity_bg"] = _soft_metric_backgrounds(metric_values["ending_equity"], higher_is_better=True)
+    rows["max_drawdown_bg"] = _soft_metric_backgrounds(metric_values["max_drawdown"], higher_is_better=True)
+    rows["pnl_to_maxdd_bg"] = _soft_metric_backgrounds(metric_values["pnl_to_maxdd"], higher_is_better=True)
+    rows["omega_ratio_bg"] = _soft_metric_backgrounds(metric_values["omega_ratio"], higher_is_better=True)
+    rows["k_ratio_bg"] = _soft_metric_backgrounds(metric_values["k_ratio"], higher_is_better=True)
+    rows["ulcer_index_bg"] = _soft_metric_backgrounds(metric_values["ulcer_index"], higher_is_better=False)
+    rows["ulcer_performance_bg"] = _soft_metric_backgrounds(metric_values["ulcer_performance"], higher_is_better=True)
     return rows
 
 
