@@ -933,6 +933,28 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "test_total_cost": [],
         }
 
+    def empty_meta_ranking_table_data() -> dict[str, list[object]]:
+        return {
+            "rank": [],
+            "lookback_bars": [],
+            "entry_z": [],
+            "exit_z": [],
+            "stop_z": [],
+            "stop_z_label": [],
+            "bollinger_k": [],
+            "rows": [],
+            "folds": [],
+            "predicted_mean": [],
+            "predicted_std": [],
+            "stability_score": [],
+            "actual_test_score_mean": [],
+            "actual_test_net_mean": [],
+            "actual_test_maxdd_mean": [],
+            "actual_test_trades_mean": [],
+            "train_score_mean": [],
+            "train_net_mean": [],
+        }
+
     def meta_selector_result_to_source(result: dict[str, object]) -> dict[str, list[object]]:
         data = empty_meta_selector_table_data()
         for row in list(result.get("selected_folds", []) or []):
@@ -941,6 +963,13 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
                 if key in {"test_started_at", "test_ended_at"} and value not in (None, ""):
                     value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
                 data[key].append(value)
+        return data
+
+    def meta_ranking_result_to_source(result: dict[str, object]) -> dict[str, list[object]]:
+        data = empty_meta_ranking_table_data()
+        for row in list(result.get("ranking_rows", []) or []):
+            for key in data:
+                data[key].append(row.get(key))
         return data
 
     def meta_result_to_equity_source(result: dict[str, object]) -> dict[str, list[object]]:
@@ -988,6 +1017,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     meta_run_button = Button(label="Run Meta Selector", button_type="primary", width=170)
     meta_status_div = Div(text="<p>Ready to learn from saved WFA optimization history before the chosen OOS date for the selected tester pair and timeframe.</p>")
     meta_table_source = ColumnDataSource(empty_meta_selector_table_data())
+    meta_ranking_source = ColumnDataSource(empty_meta_ranking_table_data())
     meta_equity_source = ColumnDataSource({"time": [], "equity": []})
     meta_equity_plot = figure(
         title="Meta Stitched Equity",
@@ -1004,6 +1034,35 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     meta_equity_plot.toolbar.autohide = True
     meta_equity_plot.yaxis.axis_label = "Equity"
     meta_equity_plot.line("time", "equity", source=meta_equity_source, line_width=2.5, color="#7c3aed")
+    meta_ranking_title = Div(text="<p><b>Meta Robustness Grid</b></p>")
+    meta_ranking_table = DataTable(
+        source=meta_ranking_source,
+        columns=[
+            TableColumn(field="rank", title="Rank", formatter=NumberFormatter(format="0"), width=56),
+            TableColumn(field="stability_score", title="Stability", formatter=NumberFormatter(format="0.000"), width=92),
+            TableColumn(field="predicted_mean", title="Pred Mean", formatter=NumberFormatter(format="0.000"), width=92),
+            TableColumn(field="predicted_std", title="Pred Std", formatter=NumberFormatter(format="0.000"), width=86),
+            TableColumn(field="actual_test_score_mean", title="Test Score", formatter=NumberFormatter(format="0.000"), width=90),
+            TableColumn(field="actual_test_net_mean", title="Test Net", formatter=NumberFormatter(format="0.00"), width=88),
+            TableColumn(field="actual_test_maxdd_mean", title="Test DD", formatter=NumberFormatter(format="0.00"), width=84),
+            TableColumn(field="actual_test_trades_mean", title="Trades", formatter=NumberFormatter(format="0.0"), width=74),
+            TableColumn(field="train_score_mean", title="Train Score", formatter=NumberFormatter(format="0.000"), width=92),
+            TableColumn(field="train_net_mean", title="Train Net", formatter=NumberFormatter(format="0.00"), width=88),
+            TableColumn(field="rows", title="Rows", formatter=NumberFormatter(format="0"), width=62),
+            TableColumn(field="folds", title="Folds", formatter=NumberFormatter(format="0"), width=62),
+            TableColumn(field="lookback_bars", title="Lookback", formatter=NumberFormatter(format="0"), width=82),
+            TableColumn(field="entry_z", title="Entry", formatter=NumberFormatter(format="0.00"), width=68),
+            TableColumn(field="exit_z", title="Exit", formatter=NumberFormatter(format="0.00"), width=68),
+            TableColumn(field="stop_z_label", title="Stop", width=70),
+            TableColumn(field="bollinger_k", title="Boll", formatter=NumberFormatter(format="0.00"), width=68),
+        ],
+        sizing_mode="stretch_width",
+        height=240,
+        sortable=True,
+        reorderable=False,
+        index_position=None,
+    )
+    meta_selected_title = Div(text="<p><b>Selected OOS Folds</b></p>")
     meta_table = DataTable(
         source=meta_table_source,
         columns=[
@@ -1075,7 +1134,16 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         sizing_mode="stretch_width",
         styles={"gap": "10px"},
     )
-    meta_content = column(meta_controls, meta_equity_plot, meta_table, sizing_mode="stretch_width", styles={"gap": "10px"})
+    meta_content = column(
+        meta_controls,
+        meta_equity_plot,
+        meta_ranking_title,
+        meta_ranking_table,
+        meta_selected_title,
+        meta_table,
+        sizing_mode="stretch_width",
+        styles={"gap": "10px"},
+    )
 
     plot_font_size_input = Spinner(title="Plot Font", low=8, high=24, step=1, value=11, width=92)
     plot_height_single_input = Spinner(title="1 Plot", low=160, step=20, value=560, width=92)
@@ -2502,6 +2570,8 @@ if (!targets.length) {
     def complete_meta(result: dict[str, object], pair: PairSelection) -> None:
         meta_table_source.data = meta_selector_result_to_source(result)
         meta_table_source.selected.indices = []
+        meta_ranking_source.data = meta_ranking_result_to_source(result)
+        meta_ranking_source.selected.indices = []
         meta_equity_source.data = meta_result_to_equity_source(result)
         refresh_meta_equity_ranges()
         failure_reason = str(result.get("failure_reason", "") or "")
@@ -2532,6 +2602,7 @@ if (!targets.length) {
             f"<p>Meta Selector completed for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> using <b>{result.get('model_type')}</b>. "
             f"OOS start: <b>{oos_label}</b>, pre-OOS rows: <b>{int(result.get('train_rows', 0) or 0)}</b>, "
             f"validation rows: <b>{int(result.get('validation_rows', 0) or 0)}</b>, OOS rows: <b>{int(result.get('oos_rows', 0) or 0)}</b>, "
+            f"ranking rows: <b>{len(result.get('ranking_rows', []) or [])}</b>, "
             f"selected folds: <b>{len(result.get('selected_folds', []) or [])}</b>, stitched net: "
             f"<b>{float(result.get('stitched_net_profit', 0.0) or 0.0):.2f}</b>, stitched max DD: "
             f"<b>{float(result.get('stitched_max_drawdown', 0.0) or 0.0):.2f}</b>, trades: "
@@ -2637,6 +2708,33 @@ if (!targets.length) {
             meta_status_div.text = (
                 f"<p>Meta-selected parameters copied into tester and executed on tester period <b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. "
                 f"<b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            )
+
+    def on_meta_ranking_selection(_attr: str, _old: object, _new: object) -> None:
+        indices = meta_ranking_source.selected.indices
+        if not indices:
+            return
+        index = indices[0]
+        data = meta_ranking_source.data
+        tester_period = (
+            _coerce_datetime(period_slider.value[0]),
+            _coerce_datetime(period_slider.value[1]),
+        )
+        lookback_input.value = int(data["lookback_bars"][index])
+        entry_input.value = float(data["entry_z"][index])
+        exit_input.value = float(data["exit_z"][index])
+        raw_stop = data["stop_z"][index]
+        if raw_stop in (None, ""):
+            stop_mode_select.value = "disabled"
+        else:
+            stop_mode_select.value = "enabled"
+            stop_input.value = float(raw_stop)
+        bollinger_input.value = float(data["bollinger_k"][index])
+        ran = apply_backtest_result(period_override=tester_period)
+        if ran:
+            meta_status_div.text = (
+                f"<p>Robustness rank <b>{int(data['rank'][index])}</b> copied into tester and executed on tester period "
+                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
             )
 
     def complete_optimization(result: DistanceOptimizationResult, mode_label: str, pair: PairSelection) -> None:
@@ -3573,6 +3671,7 @@ if (!targets.length) {
     state.trades_source.selected.on_change("indices", on_trade_selection)
     wfa_table_source.selected.on_change("indices", on_wfa_selection)
     meta_table_source.selected.on_change("indices", on_meta_selection)
+    meta_ranking_source.selected.on_change("indices", on_meta_ranking_selection)
     state.optimization_source.selected.on_change("indices", on_optimization_selection)
     state.scan_source.selected.on_change("indices", on_scan_selection)
     run_button.on_click(on_run_test)
