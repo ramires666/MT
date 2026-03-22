@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import polars as pl
 
+import domain.optimizer.distance as distance_module
 from domain.contracts import PairSelection, StrategyDefaults
 from domain.optimizer import (
     count_distance_parameter_grid,
@@ -172,3 +173,83 @@ def test_distance_genetic_search_frame_returns_sorted_rows() -> None:
     assert objective_scores == sorted(objective_scores, reverse=True)
     assert result.rows[0].trades >= 1
     assert result.rows[0].omega_ratio >= 0.0
+
+
+def test_distance_grid_dedupes_bollinger_only_evaluations(monkeypatch) -> None:
+    real_metrics = distance_module.run_distance_backtest_metrics_frame
+    call_count = 0
+
+    def counting_metrics(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_metrics(**kwargs)
+
+    monkeypatch.setattr(distance_module, "run_distance_backtest_metrics_frame", counting_metrics)
+
+    result = distance_module.optimize_distance_grid_frame(
+        frame=_sample_pair_frame(),
+        pair=PairSelection(symbol_1="US2000", symbol_2="NAS100"),
+        defaults=StrategyDefaults(),
+        search_space=parse_distance_search_space(
+            {
+                "lookback_bars": [3],
+                "entry_z": [1.0],
+                "exit_z": [0.2],
+                "stop_z": [3.0],
+                "bollinger_k": [1.5, 2.0, 2.5],
+            }
+        ),
+        objective_metric="net_profit",
+        point_1=0.01,
+        point_2=0.01,
+        contract_size_1=1.0,
+        contract_size_2=1.0,
+    )
+
+    assert len(result.rows) == 3
+    assert call_count == 1
+    assert {row.bollinger_k for row in result.rows} == {1.5, 2.0, 2.5}
+
+
+def test_distance_genetic_dedupes_bollinger_only_evaluations(monkeypatch) -> None:
+    real_metrics = distance_module.run_distance_backtest_metrics_frame
+    call_count = 0
+
+    def counting_metrics(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_metrics(**kwargs)
+
+    monkeypatch.setattr(distance_module, "run_distance_backtest_metrics_frame", counting_metrics)
+
+    result = distance_module.optimize_distance_genetic_frame(
+        frame=_sample_pair_frame(),
+        pair=PairSelection(symbol_1="US2000", symbol_2="NAS100"),
+        defaults=StrategyDefaults(),
+        search_space=parse_distance_search_space(
+            {
+                "lookback_bars": [3],
+                "entry_z": [1.0],
+                "exit_z": [0.2],
+                "stop_z": [3.0],
+                "bollinger_k": [1.5, 2.0, 2.5],
+            }
+        ),
+        objective_metric="net_profit",
+        point_1=0.01,
+        point_2=0.01,
+        contract_size_1=1.0,
+        contract_size_2=1.0,
+        config=parse_distance_genetic_config(
+            {
+                "population_size": 6,
+                "generations": 2,
+                "elite_count": 2,
+                "mutation_rate": 0.3,
+                "random_seed": 7,
+            }
+        ),
+    )
+
+    assert result.rows
+    assert call_count == 1

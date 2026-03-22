@@ -12,6 +12,7 @@ from workers.executor import build_process_pool
 
 
 EvaluateParamsFn = Callable[..., DistanceOptimizationRow]
+PrepareContextFn = Callable[..., Any]
 
 
 def is_cancelled(cancel_check: CancellationCheck | None) -> bool:
@@ -108,7 +109,23 @@ def _evaluate_params_chunk(
     spec_1: Mapping[str, Any] | None,
     spec_2: Mapping[str, Any] | None,
     evaluate_params_fn: EvaluateParamsFn,
+    prepare_context_fn: PrepareContextFn | None,
 ) -> list[DistanceOptimizationRow]:
+    context = (
+        prepare_context_fn(
+            frame=frame,
+            pair=pair,
+            defaults=defaults,
+            point_1=point_1,
+            point_2=point_2,
+            contract_size_1=contract_size_1,
+            contract_size_2=contract_size_2,
+            spec_1=spec_1,
+            spec_2=spec_2,
+        )
+        if prepare_context_fn is not None
+        else None
+    )
     return [
         evaluate_params_fn(
             trial_id=trial_id,
@@ -123,6 +140,7 @@ def _evaluate_params_chunk(
             contract_size_2=contract_size_2,
             spec_1=spec_1,
             spec_2=spec_2,
+            context=context,
         )
         for trial_id, params in tasks
     ]
@@ -141,7 +159,23 @@ def _evaluate_candidate_chunk(
     spec_1: Mapping[str, Any] | None,
     spec_2: Mapping[str, Any] | None,
     evaluate_params_fn: EvaluateParamsFn,
+    prepare_context_fn: PrepareContextFn | None,
 ) -> list[tuple[Any, DistanceOptimizationRow]]:
+    context = (
+        prepare_context_fn(
+            frame=frame,
+            pair=pair,
+            defaults=defaults,
+            point_1=point_1,
+            point_2=point_2,
+            contract_size_1=contract_size_1,
+            contract_size_2=contract_size_2,
+            spec_1=spec_1,
+            spec_2=spec_2,
+        )
+        if prepare_context_fn is not None
+        else None
+    )
     return [
         (
             candidate,
@@ -158,6 +192,7 @@ def _evaluate_candidate_chunk(
                 contract_size_2=contract_size_2,
                 spec_1=spec_1,
                 spec_2=spec_2,
+                context=context,
             ),
         )
         for candidate, trial_id, params in tasks
@@ -180,6 +215,7 @@ def evaluate_distance_tasks(
     parallel_workers: int | None,
     cancel_check: CancellationCheck | None,
     evaluate_params_fn: EvaluateParamsFn,
+    prepare_context_fn: PrepareContextFn | None = None,
     progress_callback: ProgressCallback | None = None,
     progress_stage: str = "Grid search",
 ) -> tuple[list[DistanceOptimizationRow], bool]:
@@ -188,6 +224,21 @@ def evaluate_distance_tasks(
     if worker_count <= 1:
         rows: list[DistanceOptimizationRow] = []
         cancelled = False
+        context = (
+            prepare_context_fn(
+                frame=frame,
+                pair=pair,
+                defaults=defaults,
+                point_1=point_1,
+                point_2=point_2,
+                contract_size_1=contract_size_1,
+                contract_size_2=contract_size_2,
+                spec_1=spec_1,
+                spec_2=spec_2,
+            )
+            if prepare_context_fn is not None
+            else None
+        )
         emit_progress(progress_callback, 0, total_tasks, progress_stage)
         for trial_id, params in tasks:
             if is_cancelled(cancel_check):
@@ -207,6 +258,7 @@ def evaluate_distance_tasks(
                     contract_size_2=contract_size_2,
                     spec_1=spec_1,
                     spec_2=spec_2,
+                    context=context,
                 )
             )
             emit_progress(progress_callback, len(rows), total_tasks, progress_stage)
@@ -229,6 +281,7 @@ def evaluate_distance_tasks(
             spec_1,
             spec_2,
             evaluate_params_fn,
+            prepare_context_fn,
         )
 
     return _collect_parallel_results(
@@ -258,6 +311,7 @@ def evaluate_candidate_distance_tasks(
     parallel_workers: int | None,
     cancel_check: CancellationCheck | None,
     evaluate_params_fn: EvaluateParamsFn,
+    prepare_context_fn: PrepareContextFn | None = None,
     progress_callback: ProgressCallback | None = None,
     progress_total: int = 0,
     progress_stage: str = "Genetic search",
@@ -267,6 +321,21 @@ def evaluate_candidate_distance_tasks(
     if worker_count <= 1:
         rows: list[tuple[Any, DistanceOptimizationRow]] = []
         cancelled = False
+        context = (
+            prepare_context_fn(
+                frame=frame,
+                pair=pair,
+                defaults=defaults,
+                point_1=point_1,
+                point_2=point_2,
+                contract_size_1=contract_size_1,
+                contract_size_2=contract_size_2,
+                spec_1=spec_1,
+                spec_2=spec_2,
+            )
+            if prepare_context_fn is not None
+            else None
+        )
         emit_progress(progress_callback, completed_offset, progress_total, progress_stage)
         for candidate, trial_id, params in tasks:
             if is_cancelled(cancel_check):
@@ -288,6 +357,7 @@ def evaluate_candidate_distance_tasks(
                         contract_size_2=contract_size_2,
                         spec_1=spec_1,
                         spec_2=spec_2,
+                        context=context,
                     ),
                 )
             )
@@ -311,6 +381,7 @@ def evaluate_candidate_distance_tasks(
             spec_1,
             spec_2,
             evaluate_params_fn,
+            prepare_context_fn,
         )
 
     return _collect_parallel_results(

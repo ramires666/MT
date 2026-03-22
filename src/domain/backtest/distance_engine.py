@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from math import isnan
 from typing import Any, Mapping
 
@@ -10,8 +11,10 @@ from domain.backtest.distance_models import (
     TRADE_SCHEMA,
     DistanceBacktestResult,
     DistanceParameters,
+    _LegSpec,
     _Position,
 )
+from domain.backtest.kernel import rolling_mean_std
 from domain.backtest.distance_pricing import (
     coerce_leg_spec,
     commission_for_fill,
@@ -42,23 +45,91 @@ def load_pair_frame(
     return frame_1.join(frame_2, on="time", how="inner").sort("time")
 
 
-def _rolling_mean_std(values: np.ndarray, lookback: int) -> tuple[np.ndarray, np.ndarray]:
-    mean = np.full(values.shape[0], np.nan, dtype=np.float64)
-    std = np.full(values.shape[0], np.nan, dtype=np.float64)
-    if lookback <= 1:
-        return mean, std
+@dataclass(slots=True)
+class _DistanceSignalState:
+    spread_mean: np.ndarray
+    spread_std: np.ndarray
+    zscore: np.ndarray
+    z_mean: np.ndarray
+    z_std: np.ndarray
 
-    for idx in range(lookback - 1, values.shape[0]):
-        window = values[idx - lookback + 1 : idx + 1]
-        mean[idx] = float(window.mean())
-        std[idx] = float(window.std())
-    return mean, std
+
+@dataclass(slots=True)
+class _DistanceBacktestContext:
+    times: list[object]
+    open_1: np.ndarray
+    close_1: np.ndarray
+    open_2: np.ndarray
+    close_2: np.ndarray
+    spread_points_1: np.ndarray
+    spread_points_2: np.ndarray
+    spread: np.ndarray
+    defaults: StrategyDefaults
+    leg_spec_1: _LegSpec
+    leg_spec_2: _LegSpec
+    exposure_per_leg: float
+    signal_cache: dict[int, _DistanceSignalState] = field(default_factory=dict)
 
 
 def _column_or_zeros(frame: pl.DataFrame, name: str) -> np.ndarray:
     if name not in frame.columns:
         return np.zeros(frame.height, dtype=np.float64)
     return frame.get_column(name).to_numpy().astype(np.float64)
+
+
+def prepare_distance_backtest_context(
+    frame: pl.DataFrame,
+    pair: PairSelection,
+    defaults: StrategyDefaults,
+    point_1: float,
+    point_2: float,
+    contract_size_1: float,
+    contract_size_2: float,
+    spec_1: Mapping[str, Any] | None = None,
+    spec_2: Mapping[str, Any] | None = None,
+) -> _DistanceBacktestContext:
+    leg_spec_1 = coerce_leg_spec(pair.symbol_1, spec_1, point=point_1, contract_size=contract_size_1)
+    leg_spec_2 = coerce_leg_spec(pair.symbol_2, spec_2, point=point_2, contract_size=contract_size_2)
+    close_1 = frame.get_column("close_1").to_numpy().astype(np.float64)
+    close_2 = frame.get_column("close_2").to_numpy().astype(np.float64)
+    normalized_1 = close_1 / close_1[0]
+    normalized_2 = close_2 / close_2[0]
+    return _DistanceBacktestContext(
+        times=frame.get_column("time").to_list(),
+        open_1=frame.get_column("open_1").to_numpy().astype(np.float64),
+        close_1=close_1,
+        open_2=frame.get_column("open_2").to_numpy().astype(np.float64),
+        close_2=close_2,
+        spread_points_1=_column_or_zeros(frame, "spread_1"),
+        spread_points_2=_column_or_zeros(frame, "spread_2"),
+        spread=normalized_1 - normalized_2,
+        defaults=defaults,
+        leg_spec_1=leg_spec_1,
+        leg_spec_2=leg_spec_2,
+        exposure_per_leg=defaults.margin_budget_per_leg * defaults.leverage,
+    )
+
+
+def _signal_state(context: _DistanceBacktestContext, lookback: int) -> _DistanceSignalState:
+    cached = context.signal_cache.get(int(lookback))
+    if cached is not None:
+        return cached
+    spread_mean, spread_std = rolling_mean_std(context.spread, int(lookback))
+    zscore = np.full(context.spread.shape[0], np.nan, dtype=np.float64)
+    valid_spread_mask = spread_std > 0
+    zscore[valid_spread_mask] = (
+        context.spread[valid_spread_mask] - spread_mean[valid_spread_mask]
+    ) / spread_std[valid_spread_mask]
+    z_mean, z_std = rolling_mean_std(np.nan_to_num(zscore, nan=0.0), int(lookback))
+    cached = _DistanceSignalState(
+        spread_mean=spread_mean,
+        spread_std=spread_std,
+        zscore=zscore,
+        z_mean=z_mean,
+        z_std=z_std,
+    )
+    context.signal_cache[int(lookback)] = cached
+    return cached
 
 
 def _build_summary(
@@ -106,6 +177,287 @@ def _empty_result(pair: PairSelection) -> DistanceBacktestResult:
     )
 
 
+def _empty_metrics(defaults: StrategyDefaults) -> dict[str, float | int]:
+    return {
+        "net_profit": 0.0,
+        "ending_equity": float(defaults.initial_capital),
+        "max_drawdown": 0.0,
+        "pnl_to_maxdd": 0.0,
+        "omega_ratio": 0.0,
+        "k_ratio": 0.0,
+        "score_log_trades": 0.0,
+        "ulcer_index": 0.0,
+        "ulcer_performance": 0.0,
+        "gross_profit": 0.0,
+        "spread_cost": 0.0,
+        "slippage_cost": 0.0,
+        "commission_cost": 0.0,
+        "total_cost": 0.0,
+        "trades": 0,
+        "win_rate": 0.0,
+    }
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if abs(denominator) <= 1e-12:
+        return 0.0
+    return numerator / denominator
+
+
+def _compute_k_ratio(equity: np.ndarray) -> float:
+    if equity.size < 3:
+        return 0.0
+    clipped = np.maximum(equity, 1e-9)
+    y = np.log(clipped)
+    x = np.arange(y.size, dtype=np.float64)
+    x_mean = float(x.mean())
+    y_mean = float(y.mean())
+    ss_x = float(np.square(x - x_mean).sum())
+    if ss_x <= 1e-12:
+        return 0.0
+    slope = float(np.dot(x - x_mean, y - y_mean) / ss_x)
+    intercept = y_mean - slope * x_mean
+    residuals = y - (intercept + slope * x)
+    dof = y.size - 2
+    if dof <= 0:
+        return 0.0
+    sigma = float(np.sqrt(np.square(residuals).sum() / dof))
+    if sigma <= 1e-12:
+        return 0.0
+    slope_stderr = sigma / np.sqrt(ss_x)
+    if slope_stderr <= 1e-12:
+        return 0.0
+    return float(slope / slope_stderr)
+
+
+def _finalize_metrics(
+    *,
+    defaults: StrategyDefaults,
+    equity_total: np.ndarray,
+    trades_count: int,
+    wins: int,
+    gross_profit: float,
+    spread_cost: float,
+    slippage_cost: float,
+    commission_cost: float,
+    net_profit: float,
+) -> dict[str, float | int]:
+    if equity_total.size == 0:
+        return _empty_metrics(defaults)
+
+    running_peak = np.maximum.accumulate(equity_total)
+    drawdown_abs = running_peak - equity_total
+    max_drawdown = float(drawdown_abs.max()) if drawdown_abs.size else 0.0
+    pnl_to_maxdd = _safe_ratio(net_profit, max_drawdown)
+    pnl_steps = np.diff(equity_total, prepend=equity_total[:1])
+    gains = float(np.clip(pnl_steps, 0.0, None).sum())
+    losses = float(np.clip(-pnl_steps, 0.0, None).sum())
+    omega_ratio = gains if losses <= 1e-12 else gains / losses
+    dd_pct = np.divide(drawdown_abs, running_peak, out=np.zeros_like(drawdown_abs), where=running_peak > 1e-12)
+    ulcer_index = float(np.sqrt(np.mean(dd_pct**2))) if dd_pct.size else 0.0
+    total_cost = spread_cost + slippage_cost + commission_cost
+    return {
+        "net_profit": float(net_profit),
+        "ending_equity": float(equity_total[-1]),
+        "max_drawdown": max_drawdown,
+        "pnl_to_maxdd": pnl_to_maxdd,
+        "omega_ratio": float(omega_ratio),
+        "k_ratio": _compute_k_ratio(equity_total),
+        "score_log_trades": pnl_to_maxdd * np.log(1.0 + max(0, trades_count)),
+        "ulcer_index": ulcer_index,
+        "ulcer_performance": _safe_ratio(net_profit, ulcer_index),
+        "gross_profit": float(gross_profit),
+        "spread_cost": float(spread_cost),
+        "slippage_cost": float(slippage_cost),
+        "commission_cost": float(commission_cost),
+        "total_cost": float(total_cost),
+        "trades": int(trades_count),
+        "win_rate": (wins / trades_count) if trades_count else 0.0,
+    }
+
+
+def run_distance_backtest_metrics_frame(
+    frame: pl.DataFrame,
+    pair: PairSelection,
+    defaults: StrategyDefaults,
+    params: DistanceParameters,
+    point_1: float,
+    point_2: float,
+    contract_size_1: float,
+    contract_size_2: float,
+    spec_1: Mapping[str, Any] | None = None,
+    spec_2: Mapping[str, Any] | None = None,
+    context: _DistanceBacktestContext | None = None,
+) -> dict[str, float | int]:
+    if frame.is_empty():
+        return _empty_metrics(defaults)
+
+    context = context or prepare_distance_backtest_context(
+        frame=frame,
+        pair=pair,
+        defaults=defaults,
+        point_1=point_1,
+        point_2=point_2,
+        contract_size_1=contract_size_1,
+        contract_size_2=contract_size_2,
+        spec_1=spec_1,
+        spec_2=spec_2,
+    )
+    state = _signal_state(context, params.lookback_bars)
+    defaults_local = context.defaults
+    close_1 = context.close_1
+    close_2 = context.close_2
+    open_1 = context.open_1
+    open_2 = context.open_2
+    spread_points_1 = context.spread_points_1
+    spread_points_2 = context.spread_points_2
+    zscore = state.zscore
+    leg_spec_1 = context.leg_spec_1
+    leg_spec_2 = context.leg_spec_2
+
+    equity_total = np.full(frame.height, defaults_local.initial_capital, dtype=np.float64)
+    cumulative_leg_1 = 0.0
+    cumulative_leg_2 = 0.0
+    active = False
+    active_spread_side = 0
+    active_entry_price_1 = 0.0
+    active_entry_price_2 = 0.0
+    active_reference_entry_price_1 = 0.0
+    active_reference_entry_price_2 = 0.0
+    active_spread_entry_price_1 = 0.0
+    active_spread_entry_price_2 = 0.0
+    active_lots_1 = 0.0
+    active_lots_2 = 0.0
+    active_leg_1_side = 0
+    active_leg_2_side = 0
+    active_entry_commission_1 = 0.0
+    active_entry_commission_2 = 0.0
+    trades_count = 0
+    wins = 0
+    gross_profit = 0.0
+    spread_cost = 0.0
+    slippage_cost = 0.0
+    commission_cost = 0.0
+    net_profit = 0.0
+
+    for idx in range(frame.height):
+        if active:
+            leg_1_pnl = price_to_account_pnl(close_1[idx] - active_entry_price_1, active_lots_1, active_leg_1_side, leg_spec_1)
+            leg_2_pnl = price_to_account_pnl(close_2[idx] - active_entry_price_2, active_lots_2, active_leg_2_side, leg_spec_2)
+            equity_total[idx] = defaults_local.initial_capital + cumulative_leg_1 + cumulative_leg_2 + leg_1_pnl + leg_2_pnl
+        elif idx > 0:
+            equity_total[idx] = equity_total[idx - 1]
+
+        if idx == 0:
+            continue
+
+        signal = zscore[idx - 1]
+        if isnan(signal):
+            continue
+
+        if not active:
+            if signal >= params.entry_z:
+                leg_1_side = -1
+                leg_2_side = 1
+                spread_side = -1
+            elif signal <= -params.entry_z:
+                leg_1_side = 1
+                leg_2_side = -1
+                spread_side = 1
+            else:
+                continue
+
+            reference_entry_price_1 = float(open_1[idx])
+            reference_entry_price_2 = float(open_2[idx])
+            spread_entry_price_1, entry_price_1 = price_with_costs(reference_entry_price_1, leg_1_side, float(spread_points_1[idx]), leg_spec_1.point, defaults_local.slippage_points)
+            spread_entry_price_2, entry_price_2 = price_with_costs(reference_entry_price_2, leg_2_side, float(spread_points_2[idx]), leg_spec_2.point, defaults_local.slippage_points)
+            raw_lots_1 = context.exposure_per_leg / max(margin_basis_per_lot(reference_entry_price_1, leg_spec_1), 1e-9)
+            raw_lots_2 = context.exposure_per_leg / max(margin_basis_per_lot(reference_entry_price_2, leg_spec_2), 1e-9)
+            lots_1 = normalize_volume(raw_lots_1, leg_spec_1)
+            lots_2 = normalize_volume(raw_lots_2, leg_spec_2)
+            entry_commission_1 = commission_for_fill(entry_price_1, lots_1, leg_spec_1, is_entry=True)
+            entry_commission_2 = commission_for_fill(entry_price_2, lots_2, leg_spec_2, is_entry=True)
+            cumulative_leg_1 -= entry_commission_1
+            cumulative_leg_2 -= entry_commission_2
+            equity_total[idx] = defaults_local.initial_capital + cumulative_leg_1 + cumulative_leg_2
+            active = True
+            active_spread_side = spread_side
+            active_reference_entry_price_1 = reference_entry_price_1
+            active_reference_entry_price_2 = reference_entry_price_2
+            active_spread_entry_price_1 = spread_entry_price_1
+            active_spread_entry_price_2 = spread_entry_price_2
+            active_entry_price_1 = entry_price_1
+            active_entry_price_2 = entry_price_2
+            active_lots_1 = lots_1
+            active_lots_2 = lots_2
+            active_leg_1_side = leg_1_side
+            active_leg_2_side = leg_2_side
+            active_entry_commission_1 = entry_commission_1
+            active_entry_commission_2 = entry_commission_2
+            continue
+
+        should_exit = False
+        if active_spread_side == -1 and signal <= params.exit_z:
+            should_exit = True
+        elif active_spread_side == 1 and signal >= -params.exit_z:
+            should_exit = True
+        elif params.stop_z is not None and abs(signal) >= params.stop_z:
+            should_exit = True
+        elif idx == frame.height - 1:
+            should_exit = True
+
+        if not should_exit:
+            continue
+
+        reference_exit_price_1 = float(open_1[idx])
+        reference_exit_price_2 = float(open_2[idx])
+        spread_exit_price_1, exit_price_1 = price_with_costs(reference_exit_price_1, -active_leg_1_side, float(spread_points_1[idx]), leg_spec_1.point, defaults_local.slippage_points)
+        spread_exit_price_2, exit_price_2 = price_with_costs(reference_exit_price_2, -active_leg_2_side, float(spread_points_2[idx]), leg_spec_2.point, defaults_local.slippage_points)
+        exit_commission_1 = commission_for_fill(exit_price_1, active_lots_1, leg_spec_1, is_entry=False)
+        exit_commission_2 = commission_for_fill(exit_price_2, active_lots_2, leg_spec_2, is_entry=False)
+        gross_pnl_leg_1 = price_to_account_pnl(reference_exit_price_1 - active_reference_entry_price_1, active_lots_1, active_leg_1_side, leg_spec_1)
+        gross_pnl_leg_2 = price_to_account_pnl(reference_exit_price_2 - active_reference_entry_price_2, active_lots_2, active_leg_2_side, leg_spec_2)
+        spread_pnl_leg_1 = price_to_account_pnl(spread_exit_price_1 - active_spread_entry_price_1, active_lots_1, active_leg_1_side, leg_spec_1)
+        spread_pnl_leg_2 = price_to_account_pnl(spread_exit_price_2 - active_spread_entry_price_2, active_lots_2, active_leg_2_side, leg_spec_2)
+        slippage_pnl_leg_1 = price_to_account_pnl(exit_price_1 - active_entry_price_1, active_lots_1, active_leg_1_side, leg_spec_1)
+        slippage_pnl_leg_2 = price_to_account_pnl(exit_price_2 - active_entry_price_2, active_lots_2, active_leg_2_side, leg_spec_2)
+        spread_cost_leg_1 = gross_pnl_leg_1 - spread_pnl_leg_1
+        spread_cost_leg_2 = gross_pnl_leg_2 - spread_pnl_leg_2
+        slippage_cost_leg_1 = spread_pnl_leg_1 - slippage_pnl_leg_1
+        slippage_cost_leg_2 = spread_pnl_leg_2 - slippage_pnl_leg_2
+        commission_leg_1 = active_entry_commission_1 + exit_commission_1
+        commission_leg_2 = active_entry_commission_2 + exit_commission_2
+        realized_leg_1 = slippage_pnl_leg_1 - exit_commission_1
+        realized_leg_2 = slippage_pnl_leg_2 - exit_commission_2
+        trade_pnl_leg_1 = slippage_pnl_leg_1 - commission_leg_1
+        trade_pnl_leg_2 = slippage_pnl_leg_2 - commission_leg_2
+        trade_net = trade_pnl_leg_1 + trade_pnl_leg_2
+        cumulative_leg_1 += realized_leg_1
+        cumulative_leg_2 += realized_leg_2
+        equity_total[idx] = defaults_local.initial_capital + cumulative_leg_1 + cumulative_leg_2
+        trades_count += 1
+        if trade_net > 0.0:
+            wins += 1
+        gross_profit += gross_pnl_leg_1 + gross_pnl_leg_2
+        spread_cost += spread_cost_leg_1 + spread_cost_leg_2
+        slippage_cost += slippage_cost_leg_1 + slippage_cost_leg_2
+        commission_cost += commission_leg_1 + commission_leg_2
+        net_profit += trade_net
+        active = False
+
+    return _finalize_metrics(
+        defaults=defaults_local,
+        equity_total=equity_total,
+        trades_count=trades_count,
+        wins=wins,
+        gross_profit=gross_profit,
+        spread_cost=spread_cost,
+        slippage_cost=slippage_cost,
+        commission_cost=commission_cost,
+        net_profit=net_profit,
+    )
+
+
 def run_distance_backtest_frame(
     frame: pl.DataFrame,
     pair: PairSelection,
@@ -121,27 +473,32 @@ def run_distance_backtest_frame(
     if frame.is_empty():
         return _empty_result(pair)
 
-    leg_spec_1 = coerce_leg_spec(pair.symbol_1, spec_1, point=point_1, contract_size=contract_size_1)
-    leg_spec_2 = coerce_leg_spec(pair.symbol_2, spec_2, point=point_2, contract_size=contract_size_2)
-
-    times = frame.get_column("time").to_list()
-    open_1 = frame.get_column("open_1").to_numpy()
-    close_1 = frame.get_column("close_1").to_numpy()
-    open_2 = frame.get_column("open_2").to_numpy()
-    close_2 = frame.get_column("close_2").to_numpy()
-    spread_points_1 = _column_or_zeros(frame, "spread_1")
-    spread_points_2 = _column_or_zeros(frame, "spread_2")
-
-    normalized_1 = close_1 / close_1[0]
-    normalized_2 = close_2 / close_2[0]
-    spread = normalized_1 - normalized_2
-    spread_mean, spread_std = _rolling_mean_std(spread, params.lookback_bars)
-    zscore = np.full(frame.height, np.nan, dtype=np.float64)
-    valid_spread_mask = spread_std > 0
-    zscore[valid_spread_mask] = (
-        spread[valid_spread_mask] - spread_mean[valid_spread_mask]
-    ) / spread_std[valid_spread_mask]
-    z_mean, z_std = _rolling_mean_std(np.nan_to_num(zscore, nan=0.0), params.lookback_bars)
+    context = prepare_distance_backtest_context(
+        frame=frame,
+        pair=pair,
+        defaults=defaults,
+        point_1=point_1,
+        point_2=point_2,
+        contract_size_1=contract_size_1,
+        contract_size_2=contract_size_2,
+        spec_1=spec_1,
+        spec_2=spec_2,
+    )
+    state = _signal_state(context, params.lookback_bars)
+    leg_spec_1 = context.leg_spec_1
+    leg_spec_2 = context.leg_spec_2
+    times = context.times
+    open_1 = context.open_1
+    close_1 = context.close_1
+    open_2 = context.open_2
+    close_2 = context.close_2
+    spread_points_1 = context.spread_points_1
+    spread_points_2 = context.spread_points_2
+    spread = context.spread
+    spread_mean = state.spread_mean
+    zscore = state.zscore
+    z_mean = state.z_mean
+    z_std = state.z_std
     z_upper = z_mean + params.bollinger_k * z_std
     z_lower = z_mean - params.bollinger_k * z_std
 
@@ -154,7 +511,7 @@ def run_distance_backtest_frame(
     active: _Position | None = None
     cumulative_leg_1 = 0.0
     cumulative_leg_2 = 0.0
-    exposure_per_leg = defaults.margin_budget_per_leg * defaults.leverage
+    exposure_per_leg = context.exposure_per_leg
 
     for idx in range(frame.height):
         if active is not None:

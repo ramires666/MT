@@ -1,22 +1,26 @@
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 
 from core_api.main import app
 from domain.optimizer import DistanceOptimizationResult, DistanceOptimizationRow
 
 
-client = TestClient(app)
+@pytest.fixture
+def client() -> TestClient:
+    with TestClient(app) as test_client:
+        yield test_client
 
 
-def test_optimization_health_route() -> None:
+def test_optimization_health_route(client: TestClient) -> None:
     response = client.get('/api/v1/optimization/healthz')
 
     assert response.status_code == 200
     assert response.json()['component'] == 'optimization'
 
 
-def test_distance_grid_route_returns_trials(monkeypatch) -> None:
+def test_distance_grid_route_returns_trials(monkeypatch, client: TestClient) -> None:
     def fake_optimize_distance_grid(**_kwargs) -> DistanceOptimizationResult:
         return DistanceOptimizationResult(
             objective_metric='net_profit',
@@ -76,7 +80,7 @@ def test_distance_grid_route_returns_trials(monkeypatch) -> None:
     assert body['rows'][0]['objective_score'] == 123.45
 
 
-def test_distance_genetic_route_returns_rows(monkeypatch) -> None:
+def test_distance_genetic_route_returns_rows(monkeypatch, client: TestClient) -> None:
     def fake_optimize_distance_genetic(**_kwargs) -> DistanceOptimizationResult:
         return DistanceOptimizationResult(
             objective_metric='omega_ratio',

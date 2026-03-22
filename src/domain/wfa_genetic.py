@@ -188,6 +188,7 @@ def run_distance_genetic_wfa(
             params=selected_params,
             spec_1=spec_1,
             spec_2=spec_2,
+            include_result=True,
         )
         test_metrics = test_eval["metrics"]
         test_summary = test_eval["result"].summary

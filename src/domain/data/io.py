@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +72,8 @@ def _empty_quote_frame() -> pl.DataFrame:
     )
 
 
-def load_raw_quotes_range(broker: str, symbol: str, started_at: datetime, ended_at: datetime) -> pl.DataFrame:
+@lru_cache(maxsize=64)
+def _cached_raw_quotes_range(broker: str, symbol: str, started_at: datetime, ended_at: datetime) -> pl.DataFrame:
     root = raw_symbol_root(broker, symbol)
     if not root.exists():
         return _empty_quote_frame()
@@ -85,6 +87,24 @@ def load_raw_quotes_range(broker: str, symbol: str, started_at: datetime, ended_
     )
 
 
+def load_raw_quotes_range(broker: str, symbol: str, started_at: datetime, ended_at: datetime) -> pl.DataFrame:
+    return _cached_raw_quotes_range(broker, symbol, started_at, ended_at).clone()
+
+
+@lru_cache(maxsize=64)
+def _cached_quotes_range(
+    broker: str,
+    symbol: str,
+    timeframe: Timeframe,
+    started_at: datetime,
+    ended_at: datetime,
+) -> pl.DataFrame:
+    raw = _cached_raw_quotes_range(broker=broker, symbol=symbol, started_at=started_at, ended_at=ended_at)
+    if raw.is_empty():
+        return raw
+    return resample_m5_quotes(raw, timeframe=timeframe)
+
+
 def load_quotes_range(
     broker: str,
     symbol: str,
@@ -92,28 +112,36 @@ def load_quotes_range(
     started_at: datetime,
     ended_at: datetime,
 ) -> pl.DataFrame:
-    raw = load_raw_quotes_range(broker=broker, symbol=symbol, started_at=started_at, ended_at=ended_at)
-    if raw.is_empty():
-        return raw
-    return resample_m5_quotes(raw, timeframe=timeframe)
+    return _cached_quotes_range(broker, symbol, timeframe, started_at, ended_at).clone()
 
 
-def load_instrument_catalog_frame(broker: str) -> pl.DataFrame:
+@lru_cache(maxsize=8)
+def _cached_instrument_catalog_frame(broker: str) -> pl.DataFrame:
     return read_instrument_catalog(broker)
 
 
-def load_instrument_spec(broker: str, symbol: str) -> dict[str, float | int | str]:
+def load_instrument_catalog_frame(broker: str) -> pl.DataFrame:
+    return _cached_instrument_catalog_frame(broker).clone()
+
+
+@lru_cache(maxsize=1024)
+def _cached_instrument_spec_items(broker: str, symbol: str) -> tuple[tuple[str, Any], ...]:
     catalog = load_instrument_catalog_frame(broker)
     row = catalog.filter(pl.col("symbol") == symbol)
     if row.is_empty():
         base = dict(SPEC_DEFAULTS)
         base["symbol"] = symbol
-        return base
+        return tuple(sorted(base.items()))
     merged = dict(SPEC_DEFAULTS)
     merged.update(row.to_dicts()[0])
     overrides = read_commission_overrides(broker)
     merged = merge_commission_override(merged, overrides.get(symbol))
-    return apply_broker_commission_fallback(broker, merged)
+    merged = apply_broker_commission_fallback(broker, merged)
+    return tuple(sorted(merged.items()))
+
+
+def load_instrument_spec(broker: str, symbol: str) -> dict[str, float | int | str]:
+    return dict(_cached_instrument_spec_items(broker, symbol))
 
 
 def list_symbols(broker: str) -> list[str]:

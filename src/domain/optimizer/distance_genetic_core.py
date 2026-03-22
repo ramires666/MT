@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 import numpy as np
 import polars as pl
@@ -18,6 +19,15 @@ from domain.optimizer.distance_models import (
 
 
 EvaluateCandidateTasksFn = Callable[..., tuple[list[tuple[Candidate, DistanceOptimizationRow]], bool]]
+
+
+def _execution_signature(params) -> tuple[int, float, float, float | None]:
+    return (
+        int(params.lookback_bars),
+        float(params.entry_z),
+        float(params.exit_z),
+        None if params.stop_z is None else float(params.stop_z),
+    )
 
 
 def random_candidate(search_space: DistanceGridSearchSpace, rng: np.random.Generator) -> Candidate:
@@ -108,11 +118,14 @@ def evaluate_candidates_into_cache(
     parallel_workers: int | None,
     cancel_check: CancellationCheck | None,
     evaluate_candidate_tasks_fn: EvaluateCandidateTasksFn,
+    execution_cache: dict[tuple[int, float, float, float | None], DistanceOptimizationRow] | None = None,
     progress_callback: ProgressCallback | None = None,
     progress_stage: str = "Genetic search",
     progress_total: int = 0,
 ) -> tuple[int, bool]:
     task_items = []
+    task_signatures: dict[Candidate, tuple[int, float, float, float | None]] = {}
+    pending_by_signature: dict[tuple[int, float, float, float | None], list[tuple[Candidate, int, object]]] = {}
     seen: set[Candidate] = set()
     trial_id = next_trial_id
     for candidate in population:
@@ -122,7 +135,24 @@ def evaluate_candidates_into_cache(
         params = params_from_candidate(search_space, candidate)
         if params is None:
             continue
-        task_items.append((candidate, trial_id, params))
+        signature = _execution_signature(params)
+        if execution_cache is not None and signature in execution_cache:
+            cache[candidate] = replace(
+                execution_cache[signature],
+                trial_id=int(trial_id),
+                lookback_bars=int(params.lookback_bars),
+                entry_z=float(params.entry_z),
+                exit_z=float(params.exit_z),
+                stop_z=params.stop_z,
+                bollinger_k=float(params.bollinger_k),
+            )
+            trial_id += 1
+            continue
+        pending = pending_by_signature.setdefault(signature, [])
+        pending.append((candidate, trial_id, params))
+        if len(pending) == 1:
+            task_items.append((candidate, trial_id, params))
+            task_signatures[candidate] = signature
         trial_id += 1
 
     results, cancelled = evaluate_candidate_tasks_fn(
@@ -144,6 +174,26 @@ def evaluate_candidates_into_cache(
         progress_stage=progress_stage,
         completed_offset=len(cache),
     )
+    rows_by_signature: dict[tuple[int, float, float, float | None], DistanceOptimizationRow] = {}
     for candidate, row in results:
-        cache[candidate] = row
+        signature = task_signatures.get(candidate)
+        if signature is None:
+            continue
+        rows_by_signature[signature] = row
+        if execution_cache is not None:
+            execution_cache[signature] = row
+    for signature, pending_items in pending_by_signature.items():
+        row = rows_by_signature.get(signature)
+        if row is None:
+            continue
+        for pending_candidate, pending_trial_id, params in pending_items:
+            cache[pending_candidate] = replace(
+                row,
+                trial_id=int(pending_trial_id),
+                lookback_bars=int(params.lookback_bars),
+                entry_z=float(params.entry_z),
+                exit_z=float(params.exit_z),
+                stop_z=params.stop_z,
+                bollinger_k=float(params.bollinger_k),
+            )
     return trial_id, cancelled

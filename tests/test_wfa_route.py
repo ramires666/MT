@@ -1,10 +1,16 @@
-from core_api.main import app
+import pytest
 from fastapi.testclient import TestClient
 
-client = TestClient(app)
+from core_api.main import app
 
 
-def test_wfa_run_route_accepts_payload(monkeypatch) -> None:
+@pytest.fixture
+def client() -> TestClient:
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_wfa_run_route_accepts_payload(monkeypatch, client: TestClient) -> None:
     payload = {
         "pairs": [{"symbol_1": "US2000", "symbol_2": "NAS100"}],
         "pair_mode": "single",

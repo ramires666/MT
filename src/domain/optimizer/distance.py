@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from itertools import product
 from typing import Any, Iterable, Mapping
 
 import numpy as np
 import polars as pl
 
-from domain.backtest.distance import DistanceParameters, load_pair_frame, run_distance_backtest_frame
+from domain.backtest.distance import (
+    DistanceParameters,
+    load_pair_frame,
+    prepare_distance_backtest_context,
+    run_distance_backtest_metrics_frame,
+)
 from domain.contracts import PairSelection, StrategyDefaults, Timeframe
 from domain.data.io import load_instrument_spec
 from domain.optimizer.distance_genetic_core import (
@@ -19,7 +25,6 @@ from domain.optimizer.distance_genetic_core import (
 from domain.optimizer.distance_metrics import (
     equity_metrics as _equity_metrics,
     objective_score as _objective_score,
-    params_from_candidate as _params_from_candidate,
     sort_rows as _sort_rows,
     validate_objective_metric as _validate_objective_metric,
 )
@@ -56,8 +61,9 @@ def _evaluate_params(
     contract_size_2: float,
     spec_1: Mapping[str, Any] | None = None,
     spec_2: Mapping[str, Any] | None = None,
+    context=None,
 ) -> DistanceOptimizationRow:
-    result = run_distance_backtest_frame(
+    metrics = run_distance_backtest_metrics_frame(
         frame=frame,
         pair=pair,
         defaults=defaults,
@@ -68,8 +74,8 @@ def _evaluate_params(
         contract_size_2=contract_size_2,
         spec_1=spec_1,
         spec_2=spec_2,
+        context=context,
     )
-    metrics = _equity_metrics(result)
     return DistanceOptimizationRow(
         trial_id=trial_id,
         objective_metric=objective_metric,
@@ -83,8 +89,8 @@ def _evaluate_params(
         score_log_trades=float(metrics["score_log_trades"]),
         ulcer_index=float(metrics["ulcer_index"]),
         ulcer_performance=float(metrics["ulcer_performance"]),
-        trades=int(result.summary.get("trades", 0) or 0),
-        win_rate=float(result.summary.get("win_rate", 0.0) or 0.0),
+        trades=int(metrics.get("trades", 0) or 0),
+        win_rate=float(metrics.get("win_rate", 0.0) or 0.0),
         lookback_bars=params.lookback_bars,
         entry_z=params.entry_z,
         exit_z=params.exit_z,
@@ -95,6 +101,59 @@ def _evaluate_params(
         slippage_cost=float(metrics["slippage_cost"]),
         commission_cost=float(metrics["commission_cost"]),
         total_cost=float(metrics["total_cost"]),
+    )
+
+
+def _prepare_optimizer_context(
+    *,
+    frame: pl.DataFrame,
+    pair: PairSelection,
+    defaults: StrategyDefaults,
+    point_1: float,
+    point_2: float,
+    contract_size_1: float,
+    contract_size_2: float,
+    spec_1: Mapping[str, Any] | None,
+    spec_2: Mapping[str, Any] | None,
+):
+    if frame.is_empty():
+        return None
+    return prepare_distance_backtest_context(
+        frame=frame,
+        pair=pair,
+        defaults=defaults,
+        point_1=point_1,
+        point_2=point_2,
+        contract_size_1=contract_size_1,
+        contract_size_2=contract_size_2,
+        spec_1=spec_1,
+        spec_2=spec_2,
+    )
+
+
+def _execution_signature(params: DistanceParameters) -> tuple[int, float, float, float | None]:
+    return (
+        int(params.lookback_bars),
+        float(params.entry_z),
+        float(params.exit_z),
+        None if params.stop_z is None else float(params.stop_z),
+    )
+
+
+def _clone_row_for_params(
+    row: DistanceOptimizationRow,
+    *,
+    trial_id: int,
+    params: DistanceParameters,
+) -> DistanceOptimizationRow:
+    return replace(
+        row,
+        trial_id=int(trial_id),
+        lookback_bars=int(params.lookback_bars),
+        entry_z=float(params.entry_z),
+        exit_z=float(params.exit_z),
+        stop_z=params.stop_z,
+        bollinger_k=float(params.bollinger_k),
     )
 
 
@@ -130,6 +189,7 @@ def _evaluate_params_parallel(
         parallel_workers=parallel_workers,
         cancel_check=cancel_check,
         evaluate_params_fn=_evaluate_params,
+        prepare_context_fn=_prepare_optimizer_context,
         progress_callback=progress_callback,
         progress_stage=progress_stage,
     )
@@ -169,6 +229,7 @@ def _evaluate_candidate_tasks_parallel(
         parallel_workers=parallel_workers,
         cancel_check=cancel_check,
         evaluate_params_fn=_evaluate_params,
+        prepare_context_fn=_prepare_optimizer_context,
         progress_callback=progress_callback,
         progress_total=progress_total,
         progress_stage=progress_stage,
@@ -221,8 +282,18 @@ def optimize_distance_grid_frame(
     if isinstance(search_space, Mapping):
         search_space = parse_distance_search_space(search_space)
     task_items = list(enumerate(iter_distance_parameter_grid(search_space), start=1))
-    rows, cancelled = _evaluate_params_parallel(
-        tasks=task_items,
+    unique_tasks: list[tuple[int, DistanceParameters]] = []
+    signature_by_trial: dict[int, tuple[int, float, float, float | None]] = {}
+    first_seen: set[tuple[int, float, float, float | None]] = set()
+    for trial_id, params in task_items:
+        signature = _execution_signature(params)
+        signature_by_trial[int(trial_id)] = signature
+        if signature in first_seen:
+            continue
+        first_seen.add(signature)
+        unique_tasks.append((trial_id, params))
+    unique_rows, cancelled = _evaluate_params_parallel(
+        tasks=unique_tasks,
         frame=frame,
         pair=pair,
         defaults=defaults,
@@ -237,6 +308,15 @@ def optimize_distance_grid_frame(
         cancel_check=cancel_check,
         progress_callback=progress_callback,
     )
+    unique_rows_by_signature = {
+        signature_by_trial[int(row.trial_id)]: row
+        for row in unique_rows
+    }
+    rows = [
+        _clone_row_for_params(row, trial_id=trial_id, params=params)
+        for trial_id, params in task_items
+        if (row := unique_rows_by_signature.get(signature_by_trial[int(trial_id)])) is not None
+    ]
     rows = _sort_rows(rows)
     return DistanceOptimizationResult(
         objective_metric=objective_metric,
@@ -273,6 +353,7 @@ def optimize_distance_genetic_frame(
 
     rng = np.random.default_rng(config.random_seed)
     cache: dict[Candidate, DistanceOptimizationRow] = {}
+    execution_cache: dict[tuple[int, float, float, float | None], DistanceOptimizationRow] = {}
     next_trial_id = 1
     cancelled = False
     estimated_total = config.population_size * (config.generations + 1)
@@ -300,6 +381,7 @@ def optimize_distance_genetic_frame(
             parallel_workers=parallel_workers,
             cancel_check=cancel_check,
             evaluate_candidate_tasks_fn=_evaluate_candidate_tasks_parallel,
+            execution_cache=execution_cache,
             progress_callback=progress_callback,
             progress_stage=f"Generation {generation + 1}/{config.generations}",
             progress_total=estimated_total,
@@ -344,6 +426,7 @@ def optimize_distance_genetic_frame(
             parallel_workers=parallel_workers,
             cancel_check=cancel_check,
             evaluate_candidate_tasks_fn=_evaluate_candidate_tasks_parallel,
+            execution_cache=execution_cache,
             progress_callback=progress_callback,
             progress_stage="Final population",
             progress_total=estimated_total,

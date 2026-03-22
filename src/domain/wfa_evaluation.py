@@ -4,11 +4,15 @@ from typing import Any, Mapping, Sequence
 
 import polars as pl
 
-from domain.backtest.distance import DistanceParameters, run_distance_backtest_frame
+from domain.backtest.distance import (
+    DistanceParameters,
+    prepare_distance_backtest_context,
+    run_distance_backtest_frame,
+    run_distance_backtest_metrics_frame,
+)
 from domain.contracts import PairSelection, StrategyDefaults, Timeframe
 from domain.data.io import load_instrument_spec
 from domain.optimizer.distance import (
-    _equity_metrics,
     _objective_score,
     optimize_distance_grid_frame,
 )
@@ -69,7 +73,18 @@ def candidate_params(
         ]
 
     params = distance_params_from_payload(algorithm_params)
-    train_result = run_distance_backtest_frame(
+    train_context = prepare_distance_backtest_context(
+        frame=train_frame,
+        pair=pair,
+        defaults=defaults,
+        point_1=float(spec_1.get("point", 0.0) or 0.0),
+        point_2=float(spec_2.get("point", 0.0) or 0.0),
+        contract_size_1=float(spec_1.get("contract_size", 1.0) or 1.0),
+        contract_size_2=float(spec_2.get("contract_size", 1.0) or 1.0),
+        spec_1=spec_1,
+        spec_2=spec_2,
+    )
+    train_metrics = run_distance_backtest_metrics_frame(
         frame=train_frame,
         pair=pair,
         defaults=defaults,
@@ -80,8 +95,9 @@ def candidate_params(
         contract_size_2=float(spec_2.get("contract_size", 1.0) or 1.0),
         spec_1=spec_1,
         spec_2=spec_2,
+        context=train_context,
     )
-    train_score = _objective_score(objective_metric, _equity_metrics(train_result))
+    train_score = _objective_score(objective_metric, train_metrics)
     return [(params, train_score)]
 
 
@@ -93,8 +109,10 @@ def evaluate_distance_params(
     params: DistanceParameters,
     spec_1: Mapping[str, Any],
     spec_2: Mapping[str, Any],
+    include_result: bool = False,
+    context=None,
 ) -> dict[str, Any]:
-    result = run_distance_backtest_frame(
+    metrics = run_distance_backtest_metrics_frame(
         frame=frame,
         pair=pair,
         defaults=defaults,
@@ -105,8 +123,24 @@ def evaluate_distance_params(
         contract_size_2=float(spec_2.get("contract_size", 1.0) or 1.0),
         spec_1=spec_1,
         spec_2=spec_2,
+        context=context,
     )
-    return {"result": result, "metrics": _equity_metrics(result)}
+    payload = {"metrics": metrics}
+    if include_result:
+        result = run_distance_backtest_frame(
+            frame=frame,
+            pair=pair,
+            defaults=defaults,
+            params=params,
+            point_1=float(spec_1.get("point", 0.0) or 0.0),
+            point_2=float(spec_2.get("point", 0.0) or 0.0),
+            contract_size_1=float(spec_1.get("contract_size", 1.0) or 1.0),
+            contract_size_2=float(spec_2.get("contract_size", 1.0) or 1.0),
+            spec_1=spec_1,
+            spec_2=spec_2,
+        )
+        payload["result"] = result
+    return payload
 
 
 def run_pair_window_trial(
@@ -138,6 +172,17 @@ def run_pair_window_trial(
         test_frame = slice_frame(base_frame, window.test_started_at, window.test_ended_at)
         if train_frame.is_empty() or validation_frame.is_empty() or test_frame.is_empty():
             continue
+        validation_context = prepare_distance_backtest_context(
+            frame=validation_frame,
+            pair=pair,
+            defaults=defaults,
+            point_1=float(spec_1.get("point", 0.0) or 0.0),
+            point_2=float(spec_2.get("point", 0.0) or 0.0),
+            contract_size_1=float(spec_1.get("contract_size", 1.0) or 1.0),
+            contract_size_2=float(spec_2.get("contract_size", 1.0) or 1.0),
+            spec_1=spec_1,
+            spec_2=spec_2,
+        )
 
         candidates = candidate_params(
             train_frame=train_frame,
@@ -161,6 +206,7 @@ def run_pair_window_trial(
                 params=params,
                 spec_1=spec_1,
                 spec_2=spec_2,
+                context=validation_context,
             )
             validation_score = _objective_score(objective_metric, validation_eval["metrics"])
             candidate = {
@@ -187,6 +233,7 @@ def run_pair_window_trial(
             params=best_choice["params"],
             spec_1=spec_1,
             spec_2=spec_2,
+            include_result=True,
         )
         test_summary = test_eval["result"].summary
         validation_score_total += float(best_choice["validation_score"])

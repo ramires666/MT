@@ -1,20 +1,24 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from core_api.main import app
 from domain.scan.johansen import JohansenUniverseScanResult, JohansenUniverseScanRow, JohansenUniverseScanSummary
 
 
-client = TestClient(app)
+@pytest.fixture
+def client() -> TestClient:
+    with TestClient(app) as test_client:
+        yield test_client
 
 
-def test_scan_health_route() -> None:
+def test_scan_health_route(client: TestClient) -> None:
     response = client.get('/api/v1/scan/healthz')
 
     assert response.status_code == 200
     assert response.json()['component'] == 'scan'
 
 
-def test_scan_batch_route_returns_summary(monkeypatch) -> None:
+def test_scan_batch_route_returns_summary(monkeypatch, client: TestClient) -> None:
     def fake_scan_universe_johansen(**_kwargs) -> JohansenUniverseScanResult:
         return JohansenUniverseScanResult(
             summary=JohansenUniverseScanSummary(
