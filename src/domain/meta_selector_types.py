@@ -69,6 +69,7 @@ class MetaSelectorResult:
     pair: dict[str, Any]
     timeframe: str
     history_path: str | None
+    source_wfa_run_id: str | None
     output_dir: str | None
     total_rows: int
     train_rows: int
@@ -99,6 +100,7 @@ class MetaSelectorResult:
             "pair": self.pair,
             "timeframe": self.timeframe,
             "history_path": self.history_path,
+            "source_wfa_run_id": self.source_wfa_run_id,
             "output_dir": self.output_dir,
             "total_rows": self.total_rows,
             "train_rows": self.train_rows,

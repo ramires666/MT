@@ -2598,6 +2598,8 @@ if (!targets.length) {
         validation_r2 = result.get("validation_r2")
         mae_label = "n/a" if validation_mae is None else f"{float(validation_mae or 0.0):.4f}"
         r2_label = "n/a" if validation_r2 is None else f"{float(validation_r2 or 0.0):.4f}"
+        source_wfa_run_id = str(result.get("source_wfa_run_id", "") or "")
+        source_wfa_run_sentence = "" if not source_wfa_run_id else f" WFA run: <b>{source_wfa_run_id}</b>."
         meta_status_div.text = (
             f"<p>Meta Selector completed for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> using <b>{result.get('model_type')}</b>. "
             f"OOS start: <b>{oos_label}</b>, pre-OOS rows: <b>{int(result.get('train_rows', 0) or 0)}</b>, "
@@ -2608,7 +2610,7 @@ if (!targets.length) {
             f"<b>{float(result.get('stitched_max_drawdown', 0.0) or 0.0):.2f}</b>, trades: "
             f"<b>{int(result.get('stitched_total_trades', 0) or 0)}</b>. "
             f"MAE: <b>{mae_label}</b>, R2: <b>{r2_label}</b>. "
-            f"History: <b>{result.get('history_path') or 'n/a'}</b>.</p>"
+            f"History: <b>{result.get('history_path') or 'n/a'}</b>.{source_wfa_run_sentence}</p>"
         )
 
     def run_meta_job(

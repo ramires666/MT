@@ -1,10 +1,17 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from domain.contracts import PairSelection, Timeframe
-from domain.meta_selector import FEATURE_COLUMNS, _select_rows_per_fold, _validation_split, run_meta_selector
+from domain.meta_selector import (
+    FEATURE_COLUMNS,
+    _latest_wfa_run_history,
+    _select_rows_per_fold,
+    _validation_split,
+    run_meta_selector,
+)
 
 
 def test_run_meta_selector_decision_tree_ranks_saved_wfa_history(monkeypatch, tmp_path: Path) -> None:
@@ -12,6 +19,27 @@ def test_run_meta_selector_decision_tree_ranks_saved_wfa_history(monkeypatch, tm
     history = pl.DataFrame(
         {
             "fold": [1, 1, 2, 2, 3, 3, 4, 4],
+            "trial_id": [11, 12, 21, 22, 31, 32, 41, 42],
+            "test_started_at": [
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 8, tzinfo=UTC),
+                datetime(2026, 1, 8, tzinfo=UTC),
+                datetime(2026, 1, 15, tzinfo=UTC),
+                datetime(2026, 1, 15, tzinfo=UTC),
+                datetime(2026, 1, 22, tzinfo=UTC),
+                datetime(2026, 1, 22, tzinfo=UTC),
+            ],
+            "test_ended_at": [
+                datetime(2026, 1, 8, tzinfo=UTC),
+                datetime(2026, 1, 8, tzinfo=UTC),
+                datetime(2026, 1, 15, tzinfo=UTC),
+                datetime(2026, 1, 15, tzinfo=UTC),
+                datetime(2026, 1, 22, tzinfo=UTC),
+                datetime(2026, 1, 22, tzinfo=UTC),
+                datetime(2026, 1, 29, tzinfo=UTC),
+                datetime(2026, 1, 29, tzinfo=UTC),
+            ],
             "lookback_bars": [48, 96, 48, 96, 48, 96, 48, 96],
             "entry_z": [1.5, 2.0, 1.5, 2.0, 1.5, 2.0, 1.5, 2.0],
             "exit_z": [0.3, 0.5, 0.3, 0.5, 0.3, 0.5, 0.3, 0.5],
@@ -53,6 +81,18 @@ def test_run_meta_selector_decision_tree_ranks_saved_wfa_history(monkeypatch, tm
     monkeypatch.setattr("domain.meta_selector.load_wfa_optimization_history", lambda broker, pair, timeframe: history)
     monkeypatch.setattr("domain.meta_selector.wfa_pair_history_path", lambda broker, pair, timeframe: tmp_path / "history.parquet")
     monkeypatch.setattr("domain.meta_selector.meta_selector_root", lambda: tmp_path / "meta")
+    monkeypatch.setattr(
+        "domain.meta_selector.build_selected_fold_outputs",
+        lambda **kwargs: (
+            [{"fold": 1, "test_started_at": "2026-01-01T00:00:00Z"}],
+            [{"time": "2026-01-01T00:00:00Z", "equity": 10_000.0}],
+            0.0,
+            0.0,
+            0,
+            0.0,
+            0.0,
+        ),
+    )
 
     result = run_meta_selector(broker="bybit_mt5", pair=pair, timeframe=Timeframe.M15, model_type="decision_tree")
 
@@ -65,6 +105,104 @@ def test_run_meta_selector_decision_tree_ranks_saved_wfa_history(monkeypatch, tm
 
 def test_meta_selector_features_exclude_test_columns() -> None:
     assert all(not column.startswith("test_") for column in FEATURE_COLUMNS)
+
+
+def test_latest_wfa_run_history_prefers_latest_created_at() -> None:
+    frame = pl.DataFrame(
+        {
+            "wfa_run_id": ["run_z", "run_z", "run_a", "run_a"],
+            "created_at": [
+                "2026-01-05T00:00:00+00:00",
+                "2026-01-05T00:00:01+00:00",
+                "2026-02-01T00:00:00+00:00",
+                "2026-02-01T00:00:01+00:00",
+            ],
+            "fold": [1, 2, 1, 2],
+        }
+    )
+
+    latest = _latest_wfa_run_history(frame)
+
+    assert latest.height == 2
+    assert set(latest.get_column("wfa_run_id").to_list()) == {"run_a"}
+
+
+def test_run_meta_selector_uses_latest_wfa_run(monkeypatch, tmp_path: Path) -> None:
+    pair = PairSelection(symbol_1="US2000", symbol_2="NAS100")
+    history = pl.DataFrame(
+        {
+            "wfa_run_id": ["run_old", "run_old", "run_new", "run_new"],
+            "created_at": [
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:01+00:00",
+                "2026-02-01T00:00:00+00:00",
+                "2026-02-01T00:00:01+00:00",
+            ],
+            "fold": [1, 2, 1, 2],
+            "trial_id": [11, 12, 21, 22],
+            "test_started_at": [
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 8, tzinfo=UTC),
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 8, tzinfo=UTC),
+            ],
+            "test_ended_at": [
+                datetime(2026, 1, 8, tzinfo=UTC),
+                datetime(2026, 1, 15, tzinfo=UTC),
+                datetime(2026, 1, 8, tzinfo=UTC),
+                datetime(2026, 1, 15, tzinfo=UTC),
+            ],
+            "lookback_bars": [48, 48, 96, 96],
+            "entry_z": [1.5, 1.5, 2.0, 2.0],
+            "exit_z": [0.3, 0.3, 0.5, 0.5],
+            "stop_enabled": [1, 1, 1, 1],
+            "stop_z_value": [3.0, 3.0, 4.0, 4.0],
+            "bollinger_k": [1.5, 1.5, 2.0, 2.0],
+            "train_score_log_trades": [1.0, 1.1, 4.0, 4.1],
+            "train_net_profit": [100.0, 110.0, 400.0, 410.0],
+            "train_pnl_to_maxdd": [2.0, 2.1, 6.0, 6.1],
+            "train_trades": [5, 5, 10, 10],
+            "test_trades": [3, 3, 6, 6],
+            "test_score_log_trades": [0.2, 0.3, 0.8, 0.9],
+        }
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_fit_predict(training_history, oos_history, **_kwargs):
+        captured["training_run_ids"] = sorted(set(training_history.get_column("wfa_run_id").to_list()))
+        captured["oos_run_ids"] = sorted(set(oos_history.get_column("wfa_run_id").to_list()))
+        return np.zeros(oos_history.height, dtype=np.float64), training_history.height, 0, None, None
+
+    def fake_rank_parameter_sets(frame, _predictions):
+        captured["ranking_run_ids"] = sorted(set(frame.get_column("wfa_run_id").to_list()))
+        return [{"rank": 1, "rows": frame.height}]
+
+    def fake_select_rows_per_fold(frame, _predictions):
+        captured["selected_run_ids"] = sorted(set(frame.get_column("wfa_run_id").to_list()))
+        return frame.head(1)
+
+    monkeypatch.setattr("domain.meta_selector.load_wfa_optimization_history", lambda broker, pair, timeframe: history)
+    monkeypatch.setattr("domain.meta_selector.wfa_pair_history_path", lambda broker, pair, timeframe: tmp_path / "history.parquet")
+    monkeypatch.setattr("domain.meta_selector.meta_selector_root", lambda: tmp_path / "meta")
+    monkeypatch.setattr("domain.meta_selector.with_engineered_columns", lambda frame: frame)
+    monkeypatch.setattr("domain.meta_selector.fit_predict", fake_fit_predict)
+    monkeypatch.setattr("domain.meta_selector.rank_parameter_sets", fake_rank_parameter_sets)
+    monkeypatch.setattr("domain.meta_selector.select_rows_per_fold", fake_select_rows_per_fold)
+    monkeypatch.setattr(
+        "domain.meta_selector.build_selected_fold_outputs",
+        lambda **kwargs: ([{"fold": 1, "test_started_at": "2026-01-01T00:00:00Z"}], [], 0.0, 0.0, 0, 0.0, 0.0),
+    )
+    monkeypatch.setattr("domain.meta_selector._persist_meta_selector_outputs", lambda **kwargs: tmp_path / "meta")
+
+    result = run_meta_selector(broker="bybit_mt5", pair=pair, timeframe=Timeframe.M15, model_type="decision_tree")
+
+    assert result["source_wfa_run_id"] == "run_new"
+    assert result["total_rows"] == 2
+    assert captured["training_run_ids"] == ["run_new"]
+    assert captured["oos_run_ids"] == ["run_new"]
+    assert captured["ranking_run_ids"] == ["run_new"]
+    assert captured["selected_run_ids"] == ["run_new"]
 
 
 def test_select_rows_per_fold_uses_train_metrics_for_ties() -> None:

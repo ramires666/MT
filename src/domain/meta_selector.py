@@ -66,6 +66,37 @@ def _select_rows_per_fold(frame: pl.DataFrame, predictions) -> pl.DataFrame:
     return select_rows_per_fold(frame, predictions)
 
 
+def _latest_wfa_run_id(frame: pl.DataFrame) -> str | None:
+    if frame.is_empty() or "wfa_run_id" not in frame.columns:
+        return None
+    candidates = frame.filter(
+        pl.col("wfa_run_id").is_not_null() & (pl.col("wfa_run_id").cast(pl.Utf8) != "")
+    )
+    if candidates.is_empty():
+        return None
+    if "created_at" in candidates.columns:
+        created = candidates.filter(
+            pl.col("created_at").is_not_null() & (pl.col("created_at").cast(pl.Utf8) != "")
+        )
+        if not created.is_empty():
+            latest = (
+                created
+                .group_by("wfa_run_id")
+                .agg(pl.col("created_at").cast(pl.Utf8).max().alias("latest_created_at"))
+                .sort(["latest_created_at", "wfa_run_id"], descending=[True, True])
+            )
+            if latest.height:
+                return str(latest.get_column("wfa_run_id")[0])
+    return str(candidates.get_column("wfa_run_id")[-1])
+
+
+def _latest_wfa_run_history(frame: pl.DataFrame) -> pl.DataFrame:
+    latest_run_id = _latest_wfa_run_id(frame)
+    if latest_run_id is None:
+        return frame
+    return frame.filter(pl.col("wfa_run_id") == latest_run_id)
+
+
 def _persist_meta_selector_outputs(
     *,
     broker: str,
@@ -102,6 +133,7 @@ def _empty_result(
     validation_rows: int,
     oos_rows: int,
     unique_folds: int,
+    source_wfa_run_id: str | None,
     oos_started_at: datetime | None,
     model_config: dict[str, Any],
     failure_reason: str,
@@ -113,6 +145,7 @@ def _empty_result(
         pair=pair.model_dump(mode="json"),
         timeframe=timeframe.value,
         history_path=str(history_path),
+        source_wfa_run_id=source_wfa_run_id,
         output_dir=None,
         total_rows=total_rows,
         train_rows=train_rows,
@@ -154,7 +187,9 @@ def run_meta_selector(
     effective_defaults = defaults or StrategyDefaults()
     normalized_config = normalized_model_config(model_type, model_config)
     history_path = wfa_pair_history_path(broker, pair, timeframe)
-    history = with_engineered_columns(load_wfa_optimization_history(broker, pair, timeframe))
+    raw_history = load_wfa_optimization_history(broker, pair, timeframe)
+    source_wfa_run_id = _latest_wfa_run_id(raw_history)
+    history = with_engineered_columns(_latest_wfa_run_history(raw_history))
     if history.is_empty():
         return _empty_result(
             model_type=model_type,
@@ -167,6 +202,7 @@ def run_meta_selector(
             validation_rows=0,
             oos_rows=0,
             unique_folds=0,
+            source_wfa_run_id=source_wfa_run_id,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason="no_wfa_history",
@@ -192,6 +228,7 @@ def run_meta_selector(
             validation_rows=0,
             oos_rows=int(oos_history.height),
             unique_folds=unique_windows,
+            source_wfa_run_id=source_wfa_run_id,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason="no_pre_oos_history",
@@ -209,6 +246,7 @@ def run_meta_selector(
             validation_rows=0,
             oos_rows=0,
             unique_folds=unique_windows,
+            source_wfa_run_id=source_wfa_run_id,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason="no_oos_folds_after_cutoff",
@@ -252,6 +290,7 @@ def run_meta_selector(
             validation_rows=0,
             oos_rows=int(oos_history.height),
             unique_folds=unique_windows,
+            source_wfa_run_id=source_wfa_run_id,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason=str(exc),
@@ -264,6 +303,7 @@ def run_meta_selector(
         pair=pair.model_dump(mode="json"),
         timeframe=timeframe.value,
         history_path=str(history_path),
+        source_wfa_run_id=source_wfa_run_id,
         output_dir=None,
         total_rows=int(history.height),
         train_rows=int(train_rows),
