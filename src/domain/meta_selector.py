@@ -25,6 +25,7 @@ from domain.meta_selector_types import (
     MetaSelectorResult,
     SUPPORTED_META_MODELS,
 )
+from domain.optimizer.distance_metrics import validate_objective_metric
 from storage.paths import meta_selector_root
 from storage.wfa_results import load_wfa_optimization_history, wfa_pair_history_path
 
@@ -97,6 +98,67 @@ def _latest_wfa_run_history(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.filter(pl.col("wfa_run_id") == latest_run_id)
 
 
+def _latest_wfa_objective_metric(frame: pl.DataFrame) -> str | None:
+    if frame.is_empty() or "objective_metric" not in frame.columns:
+        return None
+    candidates = frame.filter(
+        pl.col("objective_metric").is_not_null() & (pl.col("objective_metric").cast(pl.Utf8) != "")
+    )
+    if candidates.is_empty():
+        return None
+    if "created_at" in candidates.columns:
+        latest = (
+            candidates
+            .sort(["created_at", "objective_metric"], descending=[True, True])
+            .select("objective_metric")
+            .head(1)
+        )
+        if latest.height:
+            return str(latest.get_column("objective_metric")[0])
+    return str(candidates.get_column("objective_metric")[-1])
+
+
+def _resolved_meta_target(frame: pl.DataFrame, fallback_target_metric: str) -> str:
+    if "test_objective_score" in frame.columns:
+        return "test_objective_score"
+    return fallback_target_metric
+
+
+def _selected_objective_metric(*, requested_metric: str | None, source_metric: str | None) -> str | None:
+    candidate = str(requested_metric or "").strip()
+    if candidate:
+        validate_objective_metric(candidate)
+        return candidate
+    candidate = str(source_metric or "").strip()
+    if candidate:
+        validate_objective_metric(candidate)
+        return candidate
+    return None
+
+
+def _objective_score_expr(prefix: str, objective_metric: str) -> pl.Expr:
+    expr = pl.col(f"{prefix}_{objective_metric}").cast(pl.Float64)
+    if objective_metric == "ulcer_index":
+        expr = -expr
+    return expr.alias(f"{prefix}_objective_score")
+
+
+def _with_selected_objective_scores(frame: pl.DataFrame, objective_metric: str | None) -> pl.DataFrame:
+    if frame.is_empty() or objective_metric in (None, ""):
+        return frame
+    train_column = f"train_{objective_metric}"
+    test_column = f"test_{objective_metric}"
+    missing_columns = [column for column in (train_column, test_column) if column not in frame.columns]
+    if missing_columns:
+        raise ValueError(
+            f"Selected objective metric '{objective_metric}' is not available in WFA history: {', '.join(missing_columns)}."
+        )
+    return frame.with_columns(
+        _objective_score_expr("train", objective_metric),
+        _objective_score_expr("test", objective_metric),
+    )
+
+
 def _persist_meta_selector_outputs(
     *,
     broker: str,
@@ -121,6 +183,28 @@ def _persist_meta_selector_outputs(
     return ranking_path.parent
 
 
+def load_saved_meta_selector_result(
+    *,
+    broker: str,
+    pair: PairSelection,
+    timeframe: Timeframe,
+    model_type: str,
+) -> dict[str, Any] | None:
+    _ranking_path, _selected_path, _stitched_path, summary_path = _output_paths(
+        broker=broker,
+        pair=pair,
+        timeframe=timeframe,
+        model_type=model_type,
+    )
+    if not summary_path.exists():
+        return None
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _empty_result(
     *,
     model_type: str,
@@ -134,6 +218,8 @@ def _empty_result(
     oos_rows: int,
     unique_folds: int,
     source_wfa_run_id: str | None,
+    source_objective_metric: str | None,
+    selected_objective_metric: str | None,
     oos_started_at: datetime | None,
     model_config: dict[str, Any],
     failure_reason: str,
@@ -146,6 +232,8 @@ def _empty_result(
         timeframe=timeframe.value,
         history_path=str(history_path),
         source_wfa_run_id=source_wfa_run_id,
+        source_objective_metric=source_objective_metric,
+        selected_objective_metric=selected_objective_metric,
         output_dir=None,
         total_rows=total_rows,
         train_rows=train_rows,
@@ -157,6 +245,7 @@ def _empty_result(
         model_config=model_config,
         validation_mae=None,
         validation_r2=None,
+        quality_metrics={},
         ranking_rows=[],
         selected_folds=[],
         stitched_equity=[],
@@ -178,6 +267,7 @@ def run_meta_selector(
     timeframe: Timeframe,
     model_type: str = "decision_tree",
     target_metric: str = DEFAULT_META_TARGET,
+    objective_metric: str | None = None,
     defaults: StrategyDefaults | None = None,
     oos_started_at: datetime | None = None,
     model_config: Mapping[str, Any] | None = None,
@@ -189,11 +279,42 @@ def run_meta_selector(
     history_path = wfa_pair_history_path(broker, pair, timeframe)
     raw_history = load_wfa_optimization_history(broker, pair, timeframe)
     source_wfa_run_id = _latest_wfa_run_id(raw_history)
-    history = with_engineered_columns(_latest_wfa_run_history(raw_history))
+    latest_history = _latest_wfa_run_history(raw_history)
+    source_objective_metric = _latest_wfa_objective_metric(latest_history)
+    selected_objective_metric = _selected_objective_metric(
+        requested_metric=objective_metric,
+        source_metric=source_objective_metric,
+    )
+    resolved_target_metric = (
+        "test_objective_score"
+        if selected_objective_metric not in (None, "")
+        else _resolved_meta_target(latest_history, target_metric)
+    )
+    try:
+        history = with_engineered_columns(_with_selected_objective_scores(latest_history, selected_objective_metric))
+    except Exception as exc:
+        return _empty_result(
+            model_type=model_type,
+            target_metric=resolved_target_metric,
+            pair=pair,
+            timeframe=timeframe,
+            history_path=history_path,
+            total_rows=int(latest_history.height),
+            train_rows=0,
+            validation_rows=0,
+            oos_rows=0,
+            unique_folds=_history_window_count(latest_history),
+            source_wfa_run_id=source_wfa_run_id,
+            source_objective_metric=source_objective_metric,
+            selected_objective_metric=selected_objective_metric,
+            oos_started_at=oos_started_at,
+            model_config=normalized_config,
+            failure_reason=str(exc),
+        )
     if history.is_empty():
         return _empty_result(
             model_type=model_type,
-            target_metric=target_metric,
+            target_metric=resolved_target_metric,
             pair=pair,
             timeframe=timeframe,
             history_path=history_path,
@@ -203,6 +324,8 @@ def run_meta_selector(
             oos_rows=0,
             unique_folds=0,
             source_wfa_run_id=source_wfa_run_id,
+            source_objective_metric=source_objective_metric,
+            selected_objective_metric=selected_objective_metric,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason="no_wfa_history",
@@ -219,7 +342,7 @@ def run_meta_selector(
     if training_history.is_empty():
         return _empty_result(
             model_type=model_type,
-            target_metric=target_metric,
+            target_metric=resolved_target_metric,
             pair=pair,
             timeframe=timeframe,
             history_path=history_path,
@@ -229,6 +352,8 @@ def run_meta_selector(
             oos_rows=int(oos_history.height),
             unique_folds=unique_windows,
             source_wfa_run_id=source_wfa_run_id,
+            source_objective_metric=source_objective_metric,
+            selected_objective_metric=selected_objective_metric,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason="no_pre_oos_history",
@@ -237,7 +362,7 @@ def run_meta_selector(
     if oos_history.is_empty():
         return _empty_result(
             model_type=model_type,
-            target_metric=target_metric,
+            target_metric=resolved_target_metric,
             pair=pair,
             timeframe=timeframe,
             history_path=history_path,
@@ -247,19 +372,26 @@ def run_meta_selector(
             oos_rows=0,
             unique_folds=unique_windows,
             source_wfa_run_id=source_wfa_run_id,
+            source_objective_metric=source_objective_metric,
+            selected_objective_metric=selected_objective_metric,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason="no_oos_folds_after_cutoff",
         )
 
     try:
-        predictions, train_rows, validation_rows, validation_mae, validation_r2 = fit_predict(
+        fit_output = fit_predict(
             training_history,
             oos_history,
             model_type=model_type,
-            target_metric=target_metric,
+            target_metric=resolved_target_metric,
             model_config=normalized_config,
         )
+        if len(fit_output) == 5:
+            predictions, train_rows, validation_rows, validation_mae, validation_r2 = fit_output
+            quality_metrics: dict[str, Any] = {}
+        else:
+            predictions, train_rows, validation_rows, validation_mae, validation_r2, quality_metrics = fit_output
         ranking_rows = rank_parameter_sets(oos_history, predictions)
         selected = _select_rows_per_fold(oos_history, predictions)
         (
@@ -281,7 +413,7 @@ def run_meta_selector(
     except Exception as exc:
         return _empty_result(
             model_type=model_type,
-            target_metric=target_metric,
+            target_metric=resolved_target_metric,
             pair=pair,
             timeframe=timeframe,
             history_path=history_path,
@@ -291,6 +423,8 @@ def run_meta_selector(
             oos_rows=int(oos_history.height),
             unique_folds=unique_windows,
             source_wfa_run_id=source_wfa_run_id,
+            source_objective_metric=source_objective_metric,
+            selected_objective_metric=selected_objective_metric,
             oos_started_at=oos_started_at,
             model_config=normalized_config,
             failure_reason=str(exc),
@@ -299,11 +433,13 @@ def run_meta_selector(
     result = MetaSelectorResult(
         status="completed",
         model_type=model_type,
-        target_metric=target_metric,
+        target_metric=resolved_target_metric,
         pair=pair.model_dump(mode="json"),
         timeframe=timeframe.value,
         history_path=str(history_path),
         source_wfa_run_id=source_wfa_run_id,
+        source_objective_metric=source_objective_metric,
+        selected_objective_metric=selected_objective_metric,
         output_dir=None,
         total_rows=int(history.height),
         train_rows=int(train_rows),
@@ -315,6 +451,7 @@ def run_meta_selector(
         model_config=normalized_config,
         validation_mae=validation_mae,
         validation_r2=validation_r2,
+        quality_metrics=dict(quality_metrics),
         ranking_rows=ranking_rows,
         selected_folds=selected_folds,
         stitched_equity=stitched_equity,

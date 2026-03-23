@@ -147,6 +147,69 @@ def test_distance_backtest_metrics_fast_path_matches_full_result() -> None:
         assert round(float(fast[key]), 8) == round(float(expected[key]), 8)
 
 
+def test_distance_backtest_supports_opposite_signal_exit_when_exit_z_is_negative() -> None:
+    times = [datetime(2026, 1, 1, 0, 0, tzinfo=UTC) + timedelta(minutes=5 * idx) for idx in range(12)]
+    close_1 = [100.0, 100.0, 100.0, 110.0, 111.0, 110.0, 109.0, 108.0, 108.0, 108.0, 108.0, 108.0]
+    close_2 = [100.0] * 12
+    frame = pl.DataFrame(
+        {
+            "time": times,
+            "open_1": close_1,
+            "high_1": close_1,
+            "low_1": close_1,
+            "close_1": close_1,
+            "tick_volume_1": [100] * 12,
+            "spread_1": [2] * 12,
+            "real_volume_1": [10] * 12,
+            "open_2": close_2,
+            "high_2": close_2,
+            "low_2": close_2,
+            "close_2": close_2,
+            "tick_volume_2": [100] * 12,
+            "spread_2": [2] * 12,
+            "real_volume_2": [10] * 12,
+        }
+    )
+    pair = PairSelection(symbol_1="US2000", symbol_2="NAS100")
+    defaults = StrategyDefaults()
+    spec_1 = {"symbol": "US2000", "point": 0.01, "contract_size": 1.0, "trade_tick_size": 0.01, "trade_tick_value": 1.0, "volume_min": 0.01, "volume_step": 0.01}
+    spec_2 = {"symbol": "NAS100", "point": 0.01, "contract_size": 1.0, "trade_tick_size": 0.01, "trade_tick_value": 1.0, "volume_min": 0.01, "volume_step": 0.01}
+
+    reverted = run_distance_backtest_frame(
+        frame=frame,
+        pair=pair,
+        defaults=defaults,
+        params=DistanceParameters(lookback_bars=3, entry_z=1.0, exit_z=0.2, stop_z=None),
+        point_1=0.01,
+        point_2=0.01,
+        contract_size_1=1.0,
+        contract_size_2=1.0,
+        spec_1=spec_1,
+        spec_2=spec_2,
+    )
+    opposite = run_distance_backtest_frame(
+        frame=frame,
+        pair=pair,
+        defaults=defaults,
+        params=DistanceParameters(lookback_bars=3, entry_z=1.0, exit_z=-1.0, stop_z=None),
+        point_1=0.01,
+        point_2=0.01,
+        contract_size_1=1.0,
+        contract_size_2=1.0,
+        spec_1=spec_1,
+        spec_2=spec_2,
+    )
+
+    reverted_first = reverted.trades.to_dicts()[0]
+    opposite_first = opposite.trades.to_dicts()[0]
+
+    assert reverted_first["exit_time"] == times[6]
+    assert reverted_first["exit_reason"] == "mean_reversion"
+    assert opposite_first["exit_time"] == times[7]
+    assert opposite_first["exit_reason"] == "opposite_signal"
+    assert float(opposite_first["net_pnl"]) > float(reverted_first["net_pnl"])
+
+
 def test_distance_backtest_applies_per_lot_commission() -> None:
     times = [datetime(2026, 1, 1, 0, 0, tzinfo=UTC) + timedelta(minutes=5 * idx) for idx in range(12)]
     close_1 = [100.0, 100.0, 100.0, 110.0, 112.0, 108.0, 102.0, 100.0, 99.0, 100.0, 100.0, 100.0]

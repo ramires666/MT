@@ -132,6 +132,14 @@ def _signal_state(context: _DistanceBacktestContext, lookback: int) -> _Distance
     return cached
 
 
+def _signal_exit_reason(spread_side: int, signal: float, exit_z: float) -> str | None:
+    if spread_side == -1 and signal <= exit_z:
+        return "opposite_signal" if exit_z < 0.0 else "mean_reversion"
+    if spread_side == 1 and signal >= -exit_z:
+        return "opposite_signal" if exit_z < 0.0 else "mean_reversion"
+    return None
+
+
 def _build_summary(
     pair: PairSelection,
     defaults: StrategyDefaults,
@@ -397,9 +405,8 @@ def run_distance_backtest_metrics_frame(
             continue
 
         should_exit = False
-        if active_spread_side == -1 and signal <= params.exit_z:
-            should_exit = True
-        elif active_spread_side == 1 and signal >= -params.exit_z:
+        exit_reason = _signal_exit_reason(active_spread_side, signal, params.exit_z)
+        if exit_reason is not None:
             should_exit = True
         elif params.stop_z is not None and abs(signal) >= params.stop_z:
             should_exit = True
@@ -581,13 +588,9 @@ def run_distance_backtest_frame(
             continue
 
         should_exit = False
-        exit_reason = ""
-        if active.spread_side == -1 and signal <= params.exit_z:
+        exit_reason = _signal_exit_reason(active.spread_side, signal, params.exit_z)
+        if exit_reason is not None:
             should_exit = True
-            exit_reason = "mean_reversion"
-        elif active.spread_side == 1 and signal >= -params.exit_z:
-            should_exit = True
-            exit_reason = "mean_reversion"
         elif params.stop_z is not None and abs(signal) >= params.stop_z:
             should_exit = True
             exit_reason = "stop_z"

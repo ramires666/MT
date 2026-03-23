@@ -6,6 +6,7 @@ import domain.optimizer.distance as distance_module
 from domain.contracts import PairSelection, StrategyDefaults
 from domain.optimizer import (
     count_distance_parameter_grid,
+    normalize_distance_search_space,
     optimize_distance_genetic_frame,
     optimize_distance_grid_frame,
     parse_distance_genetic_config,
@@ -53,7 +54,52 @@ def test_parse_distance_search_space_supports_range_dicts() -> None:
     assert search_space.entry_z == (1.5, 2.0)
     assert search_space.exit_z == (0.3, 0.5)
     assert search_space.stop_z == (3.0, 3.5)
-    assert search_space.bollinger_k == (2.0, 2.5)
+    assert search_space.bollinger_k == 2.0
+
+
+def test_parse_distance_search_space_supports_negative_exit_z_ranges() -> None:
+    search_space = parse_distance_search_space(
+        {
+            "lookback_bars": {"start": 24, "stop": 24, "step": 24},
+            "entry_z": {"start": 1.5, "stop": 1.5, "step": 0.5},
+            "exit_z": {"start": -1.0, "stop": 0.5, "step": 0.5},
+            "stop_z": {"start": 3.0, "stop": 3.0, "step": 0.5},
+            "bollinger_k": {"start": 2.0, "stop": 2.0, "step": 0.5},
+        }
+    )
+
+    assert search_space.exit_z == (-1.0, -0.5, 0.0, 0.5)
+
+
+def test_parse_distance_search_space_supports_descending_ranges() -> None:
+    search_space = parse_distance_search_space(
+        {
+            "lookback_bars": {"start": 48, "stop": 24, "step": 24},
+            "entry_z": {"start": 2.0, "stop": 1.0, "step": 0.5},
+            "exit_z": {"start": 0.5, "stop": -0.5, "step": 0.5},
+            "stop_z": {"start": 4.0, "stop": 3.0, "step": 0.5},
+            "bollinger_k": {"start": 2.0, "stop": 2.5, "step": 0.5},
+        }
+    )
+
+    assert search_space.lookback_bars == (48, 24)
+    assert search_space.entry_z == (2.0, 1.5, 1.0)
+    assert search_space.exit_z == (0.5, 0.0, -0.5)
+    assert search_space.stop_z == (4.0, 3.5, 3.0)
+
+
+def test_legacy_normalize_distance_search_space_keeps_negative_exit_z() -> None:
+    normalized = normalize_distance_search_space(
+        {
+            "lookback_bars": [24],
+            "entry_z": [1.5],
+            "exit_z": [-1.0, 0.5],
+            "stop_z": [3.0],
+            "bollinger_k": [2.0],
+        }
+    )
+
+    assert normalized["exit_z"] == [-1.0, 0.5]
 
 
 def test_parse_distance_search_space_supports_disabled_stop() -> None:
@@ -175,7 +221,7 @@ def test_distance_genetic_search_frame_returns_sorted_rows() -> None:
     assert result.rows[0].omega_ratio >= 0.0
 
 
-def test_distance_grid_dedupes_bollinger_only_evaluations(monkeypatch) -> None:
+def test_distance_grid_uses_fixed_bollinger_value_from_search_space(monkeypatch) -> None:
     real_metrics = distance_module.run_distance_backtest_metrics_frame
     call_count = 0
 
@@ -206,12 +252,12 @@ def test_distance_grid_dedupes_bollinger_only_evaluations(monkeypatch) -> None:
         contract_size_2=1.0,
     )
 
-    assert len(result.rows) == 3
+    assert len(result.rows) == 1
     assert call_count == 1
-    assert {row.bollinger_k for row in result.rows} == {1.5, 2.0, 2.5}
+    assert {row.bollinger_k for row in result.rows} == {1.5}
 
 
-def test_distance_genetic_dedupes_bollinger_only_evaluations(monkeypatch) -> None:
+def test_distance_genetic_uses_fixed_bollinger_value_from_search_space(monkeypatch) -> None:
     real_metrics = distance_module.run_distance_backtest_metrics_frame
     call_count = 0
 
@@ -253,3 +299,4 @@ def test_distance_genetic_dedupes_bollinger_only_evaluations(monkeypatch) -> Non
 
     assert result.rows
     assert call_count == 1
+    assert {row.bollinger_k for row in result.rows} == {1.5}

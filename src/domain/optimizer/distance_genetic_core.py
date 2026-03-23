@@ -38,7 +38,6 @@ def random_candidate(search_space: DistanceGridSearchSpace, rng: np.random.Gener
             int(rng.integers(0, len(search_space.entry_z))),
             int(rng.integers(0, len(search_space.exit_z))),
             int(rng.integers(0, len(search_space.stop_z))),
-            int(rng.integers(0, len(search_space.bollinger_k))),
         )
         if params_from_candidate(search_space, candidate) is not None:
             return candidate
@@ -57,7 +56,6 @@ def mutate_candidate(
         len(search_space.entry_z),
         len(search_space.exit_z),
         len(search_space.stop_z),
-        len(search_space.bollinger_k),
     )
     for index, length in enumerate(lengths):
         if length > 1 and float(rng.random()) < config.mutation_rate:

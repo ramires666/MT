@@ -204,7 +204,7 @@ def run_distance_genetic_wfa(
                 "exit_z": float(best.exit_z),
                 "stop_z": best.stop_z,
                 "bollinger_k": float(best.bollinger_k),
-                "train_score": round(float(best.score_log_trades), 6),
+                "train_score": round(float(best.objective_score), 6),
                 "train_net_profit": round(float(best.net_profit), 6),
                 "train_max_drawdown": round(float(best.max_drawdown), 6),
                 "train_trades": int(best.trades),
@@ -297,6 +297,7 @@ def run_distance_genetic_wfa(
             test_units=int(test_units),
             step_units=int(effective_step_units),
             unit=unit,
+            objective_metric=objective_metric,
             result=result_payload,
         )
         result_payload["snapshot_path"] = str(snapshot_path)

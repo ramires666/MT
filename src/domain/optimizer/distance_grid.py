@@ -95,9 +95,9 @@ def normalize_distance_search_space(search_space: dict[str, Any] | None) -> dict
         normalized[key] = _coerce_numeric_list(source.get(key), fallback)
     normalized["lookback_bars"] = [int(value) for value in normalized["lookback_bars"] if int(value) > 1]
     normalized["entry_z"] = [float(value) for value in normalized["entry_z"] if float(value) > 0]
-    normalized["exit_z"] = [float(value) for value in normalized["exit_z"] if float(value) >= 0]
+    normalized["exit_z"] = [float(value) for value in normalized["exit_z"]]
     normalized["stop_z"] = [float(value) for value in normalized["stop_z"] if float(value) > 0]
-    normalized["bollinger_k"] = [float(value) for value in normalized["bollinger_k"] if float(value) > 0]
+    normalized["bollinger_k"] = [float(value) for value in normalized["bollinger_k"] if float(value) > 0][:1] or [2.0]
     return normalized
 
 
@@ -246,20 +246,20 @@ def run_distance_grid_search_frame(
             trials=[],
         )
 
+    fixed_bollinger_k = float(normalized_space["bollinger_k"][0])
     combinations = product(
         normalized_space["lookback_bars"],
         normalized_space["entry_z"],
         normalized_space["exit_z"],
         normalized_space["stop_z"],
-        normalized_space["bollinger_k"],
     )
-    for trial_id, (lookback_bars, entry_z, exit_z, stop_z, bollinger_k) in enumerate(combinations, start=1):
+    for trial_id, (lookback_bars, entry_z, exit_z, stop_z) in enumerate(combinations, start=1):
         params = DistanceParameters(
             lookback_bars=int(lookback_bars),
             entry_z=float(entry_z),
             exit_z=float(exit_z),
             stop_z=float(stop_z),
-            bollinger_k=float(bollinger_k),
+            bollinger_k=fixed_bollinger_k,
         )
         backtest = run_distance_backtest_frame(
             frame=frame,
@@ -296,7 +296,7 @@ def run_distance_grid_search_frame(
                 entry_z=float(entry_z),
                 exit_z=float(exit_z),
                 stop_z=float(stop_z),
-                bollinger_k=float(bollinger_k),
+                bollinger_k=fixed_bollinger_k,
             )
         )
 

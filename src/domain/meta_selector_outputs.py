@@ -7,6 +7,7 @@ from domain.backtest.distance import DistanceParameters, run_distance_backtest_f
 from domain.contracts import PairSelection, StrategyDefaults, Timeframe
 from domain.data.io import load_instrument_spec
 from domain.optimizer.distance import load_pair_frame
+from domain.meta_selector_ml import objective_score_columns
 
 
 def stitch_equity_chunks(chunks: list[dict[str, Any]], initial_capital: float) -> list[dict[str, Any]]:
@@ -50,6 +51,7 @@ def build_selected_fold_outputs(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float, float, int, float, float]:
     if selected.is_empty():
         return [], [], 0.0, 0.0, 0, 0.0, 0.0
+    _train_score_column, test_score_column = objective_score_columns(selected)
     spec_1 = load_instrument_spec(broker, pair.symbol_1)
     spec_2 = load_instrument_spec(broker, pair.symbol_2)
     selected_rows: list[dict[str, Any]] = []
@@ -117,7 +119,7 @@ def build_selected_fold_outputs(
                 "stop_z_label": "disabled" if not stop_enabled else f"{float(stop_value or 0.0):.2f}",
                 "bollinger_k": float(params.bollinger_k),
                 "predicted_target": float(row.get("predicted_target", 0.0) or 0.0),
-                "test_score": float(row.get("test_score_log_trades", 0.0) or 0.0),
+                "test_score": float(row.get(test_score_column, 0.0) or 0.0),
                 "test_net_profit": float(summary.get("net_pnl", 0.0) or 0.0),
                 "test_max_drawdown": float(summary.get("max_drawdown", 0.0) or 0.0),
                 "test_trades": int(summary.get("trades", 0) or 0),

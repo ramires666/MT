@@ -43,6 +43,7 @@ PARAMETER_COLUMNS = [
 ]
 
 NUMERIC_FILL_COLUMNS = FEATURE_COLUMNS + [
+    "test_objective_score",
     "test_score_log_trades",
     "test_net_profit",
     "test_max_drawdown",
@@ -70,6 +71,8 @@ class MetaSelectorResult:
     timeframe: str
     history_path: str | None
     source_wfa_run_id: str | None
+    source_objective_metric: str | None
+    selected_objective_metric: str | None
     output_dir: str | None
     total_rows: int
     train_rows: int
@@ -81,6 +84,7 @@ class MetaSelectorResult:
     model_config: dict[str, Any]
     validation_mae: float | None
     validation_r2: float | None
+    quality_metrics: dict[str, Any]
     ranking_rows: list[dict[str, Any]]
     selected_folds: list[dict[str, Any]]
     stitched_equity: list[dict[str, Any]]
@@ -101,6 +105,8 @@ class MetaSelectorResult:
             "timeframe": self.timeframe,
             "history_path": self.history_path,
             "source_wfa_run_id": self.source_wfa_run_id,
+            "source_objective_metric": self.source_objective_metric,
+            "selected_objective_metric": self.selected_objective_metric,
             "output_dir": self.output_dir,
             "total_rows": self.total_rows,
             "train_rows": self.train_rows,
@@ -112,6 +118,7 @@ class MetaSelectorResult:
             "model_config": self.model_config,
             "validation_mae": self.validation_mae,
             "validation_r2": self.validation_r2,
+            "quality_metrics": self.quality_metrics,
             "ranking_rows": self.ranking_rows,
             "selected_folds": self.selected_folds,
             "stitched_equity": self.stitched_equity,

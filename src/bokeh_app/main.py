@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
+import json
 from html import unescape
+from math import ceil, floor
 import os
 import re
+from pathlib import Path
 from threading import Event
 
 import polars as pl
@@ -45,8 +47,15 @@ from app_config import get_settings
 from bokeh_app.adapters import empty_backtest_sources, optimization_results_to_source, result_to_sources, scan_results_to_source
 from bokeh_app.browser_state import BrowserStateBinding
 from bokeh_app.file_state import FileStateController
+from bokeh_app.numeric_inputs import normalize_fractional_value
 from bokeh_app.state import AppState
+from bokeh_app.table_export import export_table_to_xlsx, metadata_rows_from_mapping
 from bokeh_app.view_utils import compute_plot_height, compute_series_bounds
+from bokeh_app.zscore_diagnostics import (
+    build_zscore_diagnostics,
+    empty_zscore_hist_source,
+    empty_zscore_metric_source,
+)
 from domain.backtest.distance import DistanceParameters, run_distance_backtest
 from domain.contracts import (
     OptimizationMode,
@@ -58,11 +67,18 @@ from domain.contracts import (
     UnitRootTest,
     WfaWindowUnit,
 )
+from domain.data.co_movers import (
+    ALL_CO_MOVERS_LABEL,
+    co_mover_group_labels_for_symbol,
+    co_mover_symbols_for_symbol,
+)
 from domain.data.io import load_instrument_catalog_frame
 from domain.optimizer import DistanceOptimizationResult, OBJECTIVE_METRICS, count_distance_parameter_grid, optimize_distance_genetic, optimize_distance_grid
 from domain.scan.johansen import JohansenScanParameters, JohansenUniverseScanResult, scan_universe_johansen
 from domain.wfa import run_distance_genetic_wfa
-from domain.meta_selector import DEFAULT_META_TARGET, SUPPORTED_META_MODELS, run_meta_selector
+from domain.wfa_serialization import serialize_time
+from domain.meta_selector import DEFAULT_META_TARGET, SUPPORTED_META_MODELS, load_saved_meta_selector_result, run_meta_selector
+from domain.meta_selector_ml import normalized_model_config
 from storage.paths import ui_state_path
 from tools.mt5_export_catalog_sync import build_jobs, chunked, resolve_symbols, symbol_partitions_exist
 from tools.mt5_terminal_export_sync import decode_exports, default_common_root, read_export_statuses, run_terminal_export, write_job_manifest, write_startup_config
@@ -85,7 +101,8 @@ OBJECTIVE_OPTIONS = list(OBJECTIVE_METRICS)
 BYBIT_FEE_MODE_OPTIONS = ["tight_spread", "zero_fee"]
 STOP_MODE_OPTIONS = ["enabled", "disabled"]
 OPTIMIZATION_RANGE_MODE_OPTIONS = ["manual", "auto"]
-LEG_2_FILTER_OPTIONS = ["all_symbols", "cointegrated_only"]
+LEG_2_FILTER_OPTIONS = ["all_symbols", "co_movers", "cointegrated_only"]
+NO_CO_MOVER_GROUP_LABEL = "-- no co-mover groups --"
 DOWNLOAD_SCOPE_OPTIONS = ["symbol", "group"]
 DOWNLOAD_POLICY_OPTIONS = ["missing_only", "force"]
 WFA_UNIT_OPTIONS = [item.value for item in WfaWindowUnit]
@@ -177,6 +194,10 @@ def _datetime_to_bokeh_millis(value: datetime) -> float:
 def _read_spinner_value(widget: Spinner, fallback: float, *, cast=float) -> float | int:
     if widget.value is None:
         return cast(fallback)
+    if cast is not int:
+        normalized = normalize_fractional_value(widget.value, step=widget.step, low=widget.low, high=widget.high)
+        if normalized is not None:
+            return float(normalized)
     return cast(widget.value)
 
 
@@ -202,11 +223,15 @@ def build_document() -> None:
     state = AppState(shared_x_range=shared_range)
     doc = curdoc()
     optimization_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="distance-optimizer")
-    optimization_future: Future[tuple[DistanceOptimizationResult, str, PairSelection]] | None = None
+    optimization_future: Future[tuple[DistanceOptimizationResult, str, PairSelection, dict[str, object]]] | None = None
     optimization_poll_callback: object | None = None
     optimization_cancel_event = Event()
     optimizer_parallel_workers = max(1, int(settings.optimizer_parallel_workers))
     optimization_progress = {"completed": 0, "total": 0, "stage": "Idle"}
+    optimization_request_context: dict[str, object] | None = None
+    displayed_optimization_signature: dict[str, object] | None = None
+    optimization_summary_html = ""
+    suppress_optimization_selection = False
     scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="johansen-scan")
     scan_future: Future[JohansenUniverseScanResult] | None = None
     scan_poll_callback: object | None = None
@@ -225,28 +250,37 @@ def build_document() -> None:
     meta_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="meta-selector")
     meta_future: Future[tuple[dict[str, object], PairSelection]] | None = None
     meta_poll_callback: object | None = None
+    displayed_meta_signature: dict[str, object] | None = None
     service_log_lines: list[str] = []
     service_log_last_message: dict[str, str] = {}
 
     summary_div = Div(text="<p>Ready. Refresh instruments, choose a pair, and run the first Distance test.</p>")
     refresh_button = Button(label="Refresh Instruments", button_type="primary")
     reset_defaults_button = Button(label="Reset Defaults", button_type="default")
-    group_select = Select(title="Group", value=GROUP_OPTIONS[0], options=GROUP_OPTIONS)
-    symbol_1_select = Select(title="Symbol 1", value=INSTRUMENT_PLACEHOLDER, options=[INSTRUMENT_PLACEHOLDER])
-    symbol_2_select = Select(title="Symbol 2", value=INSTRUMENT_PLACEHOLDER, options=[INSTRUMENT_PLACEHOLDER])
+    group_select = Select(title="Group", value=GROUP_OPTIONS[0], options=GROUP_OPTIONS, width=170)
+    symbol_1_select = Select(title="Symbol 1", value=INSTRUMENT_PLACEHOLDER, options=[INSTRUMENT_PLACEHOLDER], width=150)
+    symbol_2_select = Select(title="Symbol 2", value=INSTRUMENT_PLACEHOLDER, options=[INSTRUMENT_PLACEHOLDER], width=150)
     leg_2_filter_select = Select(
         title="Leg 2 Filter",
         value="all_symbols",
         options=LEG_2_FILTER_OPTIONS,
-        description="all_symbols keeps the full group list. cointegrated_only limits leg 2 to partners from the latest saved scan for the selected type and timeframe.",
+        description="all_symbols keeps the full group list. co_movers limits leg 2 to local predefined co-move groups for Symbol 1. cointegrated_only limits leg 2 to partners from the latest saved scan for the selected type and timeframe.",
+    )
+    co_mover_group_select = Select(
+        title="Co-Mover Group",
+        value=ALL_CO_MOVERS_LABEL,
+        options=[ALL_CO_MOVERS_LABEL],
+        visible=False,
+        description="Choose which local co-mover cluster is used for Symbol 2 filtering. The default unions all matching co-mover groups for Symbol 1.",
     )
     leg_2_cointegration_kind_select = Select(
         title="Cointegration Type",
         value=COINTEGRATION_KIND_OPTIONS[0],
         options=list(COINTEGRATION_KIND_OPTIONS),
+        visible=False,
         description="Select which saved cointegration list is used for leg 2 filtering. New scans are currently implemented for johansen; other types can still be browsed when saved.",
     )
-    timeframe_select = Select(title="Timeframe", value=Timeframe.M15.value, options=TIMEFRAME_OPTIONS)
+    timeframe_select = Select(title="Timeframe", value=Timeframe.M15.value, options=TIMEFRAME_OPTIONS, width=120)
     period_slider = DateRangeSlider(
         title="Test Period",
         start=_ui_datetime(history_start),
@@ -262,21 +296,33 @@ def build_document() -> None:
     stop_mode_select = Select(title="Stop Z Mode", value="enabled", options=STOP_MODE_OPTIONS)
     lookback_input = Spinner(title="Lookback Bars", low=5, step=1, value=96)
     entry_input = Spinner(title="Entry Z", low=0.1, step=0.1, value=2.0)
-    exit_input = Spinner(title="Exit Z", low=0.0, step=0.1, value=0.5)
+    exit_input = Spinner(title="Exit Z", low=-5.0, step=0.1, value=0.5)
     stop_input = Spinner(title="Stop Z", low=0.1, step=0.1, value=3.5)
     bollinger_input = Spinner(title="Bollinger K", low=0.1, step=0.1, value=2.0)
     run_button = Button(label="Run Test", button_type="success")
+
+    universe_group_row = row(
+        group_select,
+        timeframe_select,
+        sizing_mode="stretch_width",
+        styles={"gap": "12px", "align-items": "flex-end"},
+    )
+    universe_symbols_row = row(
+        symbol_1_select,
+        symbol_2_select,
+        sizing_mode="stretch_width",
+        styles={"gap": "12px", "align-items": "flex-end"},
+    )
 
     sidebar = column(
         Div(text="<div class='sidebar-heading'><h2>MT Pair Tester</h2><p>Distance tester slice with responsive charts.</p></div>"),
         Div(text="<h3>Universe</h3>"),
         row(refresh_button, reset_defaults_button, sizing_mode="stretch_width"),
-        group_select,
-        symbol_1_select,
-        symbol_2_select,
+        universe_group_row,
+        universe_symbols_row,
         leg_2_filter_select,
+        co_mover_group_select,
         leg_2_cointegration_kind_select,
-        timeframe_select,
         period_slider,
         Div(text="<h3>Algorithm</h3>"),
         algorithm_select,
@@ -314,16 +360,13 @@ def build_document() -> None:
     opt_entry_start = Spinner(title="Entry Z Start", low=0.1, step=0.1, value=1.5)
     opt_entry_stop = Spinner(title="Entry Z Stop", low=0.1, step=0.1, value=2.5)
     opt_entry_step = Spinner(title="Entry Z Step", low=0.1, step=0.1, value=0.5)
-    opt_exit_start = Spinner(title="Exit Z Start", low=0.0, step=0.1, value=0.3)
-    opt_exit_stop = Spinner(title="Exit Z Stop", low=0.0, step=0.1, value=0.7)
+    opt_exit_start = Spinner(title="Exit Z Start", low=-5.0, step=0.1, value=0.3)
+    opt_exit_stop = Spinner(title="Exit Z Stop", low=-5.0, step=0.1, value=0.7)
     opt_exit_step = Spinner(title="Exit Z Step", low=0.1, step=0.1, value=0.2)
     opt_stop_mode_select = Select(title="Opt Stop Z", value="enabled", options=STOP_MODE_OPTIONS)
     opt_stop_start = Spinner(title="Stop Z Start", low=0.1, step=0.1, value=3.0)
     opt_stop_stop = Spinner(title="Stop Z Stop", low=0.1, step=0.1, value=4.0)
     opt_stop_step = Spinner(title="Stop Z Step", low=0.1, step=0.1, value=0.5)
-    opt_bollinger_start = Spinner(title="Bollinger Start", low=0.1, step=0.1, value=1.5)
-    opt_bollinger_stop = Spinner(title="Bollinger Stop", low=0.1, step=0.1, value=2.5)
-    opt_bollinger_step = Spinner(title="Bollinger Step", low=0.1, step=0.1, value=0.5)
     genetic_population_input = Spinner(title="Population Size", low=4, step=1, value=24)
     genetic_generations_input = Spinner(title="Generations", low=1, step=1, value=12)
     genetic_elite_input = Spinner(title="Elite Count", low=1, step=1, value=4)
@@ -352,16 +395,13 @@ def build_document() -> None:
     opt_entry_start_control = optimizer_help(opt_entry_start, "Minimum Entry Z threshold. A trade opens when absolute z-score reaches this level.", width=160)
     opt_entry_stop_control = optimizer_help(opt_entry_stop, "Maximum Entry Z threshold.", width=160)
     opt_entry_step_control = optimizer_help(opt_entry_step, "Entry Z increment in manual-grid mode.", width=160)
-    opt_exit_start_control = optimizer_help(opt_exit_start, "Minimum Exit Z threshold. A trade closes when z-score reverts toward this level.", width=160)
-    opt_exit_stop_control = optimizer_help(opt_exit_stop, "Maximum Exit Z threshold.", width=160)
-    opt_exit_step_control = optimizer_help(opt_exit_step, "Exit Z increment in manual-grid mode.", width=160)
+    opt_exit_start_control = optimizer_help(opt_exit_start, "Minimum Exit Z threshold. Negative values mean hold the trade until z-score crosses to the opposite side. Example: exit_z = -1.0 exits only after the opposite signal reaches 1.0.", width=160)
+    opt_exit_stop_control = optimizer_help(opt_exit_stop, "Maximum Exit Z threshold. Keep exit_z lower than entry_z; negative values are allowed for opposite-signal exits.", width=160)
+    opt_exit_step_control = optimizer_help(opt_exit_step, "Exit Z increment in manual-grid mode. Step stays positive even when the range includes negative Exit Z values.", width=160)
     opt_stop_mode_control = optimizer_help(opt_stop_mode_select, "Enable or disable the statistical stop. disabled means no emergency exit by Stop Z.", width=160)
     opt_stop_start_control = optimizer_help(opt_stop_start, "Minimum Stop Z. This is a statistical stop on spread divergence, not a plain price stop-loss.", width=160)
     opt_stop_stop_control = optimizer_help(opt_stop_stop, "Maximum Stop Z.", width=160)
     opt_stop_step_control = optimizer_help(opt_stop_step, "Stop Z increment in manual-grid mode.", width=160)
-    opt_bollinger_start_control = optimizer_help(opt_bollinger_start, "Minimum Bollinger K multiplier for z-score bands.", width=158)
-    opt_bollinger_stop_control = optimizer_help(opt_bollinger_stop, "Maximum Bollinger K multiplier.", width=158)
-    opt_bollinger_step_control = optimizer_help(opt_bollinger_step, "Bollinger K increment in manual-grid mode.", width=158)
     genetic_population_control = optimizer_help(genetic_population_input, "Population size for genetic search. Larger populations usually improve search quality but increase runtime.", width=158)
     genetic_generations_control = optimizer_help(genetic_generations_input, "Number of generations in genetic search.", width=158)
     genetic_elite_control = optimizer_help(genetic_elite_input, "How many top candidates are copied into the next generation unchanged.", width=158)
@@ -403,6 +443,64 @@ def build_document() -> None:
     zscore_plot.line("x", "zscore", source=state.zscore_source, line_width=2, color="#f97316")
     zscore_plot.line("x", "upper", source=state.zscore_source, line_dash="dashed", line_color="#9ca3af")
     zscore_plot.line("x", "lower", source=state.zscore_source, line_dash="dashed", line_color="#9ca3af")
+
+    zscore_metrics_source = ColumnDataSource(empty_zscore_metric_source())
+    zscore_hist_source = ColumnDataSource(empty_zscore_hist_source())
+    zscore_hist_plot = figure(
+        title="Z-score Distribution",
+        x_range=Range1d(start=-1.0, end=1.0),
+        y_range=Range1d(start=0.0, end=1.0),
+        height=300,
+        sizing_mode="stretch_width",
+        tools="pan,wheel_zoom,box_zoom,reset,save",
+        active_scroll="wheel_zoom",
+    )
+    zscore_hist_plot.toolbar.autohide = True
+    zscore_hist_plot.xaxis.axis_label = "Z-score"
+    zscore_hist_plot.yaxis.axis_label = "Share of Valid Bars"
+    zscore_hist_plot.xaxis.ticker = FixedTicker(ticks=[-1.0, 0.0, 1.0])
+    zscore_hist_plot.quad(
+        top="share",
+        bottom=0.0,
+        left="left",
+        right="right",
+        source=zscore_hist_source,
+        fill_color="#f97316",
+        fill_alpha=0.36,
+        line_color="#c2410c",
+        line_alpha=0.55,
+    )
+    zscore_hist_zero_span = Span(location=0.0, dimension="height", line_color="#0f172a", line_alpha=0.45, line_width=2)
+    zscore_hist_entry_pos_span = Span(location=0.0, dimension="height", line_color="#2563eb", line_alpha=0.65, line_width=2, line_dash="dashed", visible=False)
+    zscore_hist_entry_neg_span = Span(location=0.0, dimension="height", line_color="#2563eb", line_alpha=0.65, line_width=2, line_dash="dashed", visible=False)
+    zscore_hist_exit_pos_span = Span(location=0.0, dimension="height", line_color="#16a34a", line_alpha=0.70, line_width=2, line_dash="dotdash", visible=False)
+    zscore_hist_exit_neg_span = Span(location=0.0, dimension="height", line_color="#16a34a", line_alpha=0.70, line_width=2, line_dash="dotdash", visible=False)
+    zscore_hist_stop_pos_span = Span(location=0.0, dimension="height", line_color="#dc2626", line_alpha=0.70, line_width=2, line_dash="dotted", visible=False)
+    zscore_hist_stop_neg_span = Span(location=0.0, dimension="height", line_color="#dc2626", line_alpha=0.70, line_width=2, line_dash="dotted", visible=False)
+    for span in [
+        zscore_hist_zero_span,
+        zscore_hist_entry_pos_span,
+        zscore_hist_entry_neg_span,
+        zscore_hist_exit_pos_span,
+        zscore_hist_exit_neg_span,
+        zscore_hist_stop_pos_span,
+        zscore_hist_stop_neg_span,
+    ]:
+        zscore_hist_plot.add_layout(span)
+    zscore_metrics_table = DataTable(
+        source=zscore_metrics_source,
+        columns=[
+            TableColumn(field="metric", title="Metric", width=180),
+            TableColumn(field="value", title="Value", width=92),
+            TableColumn(field="note", title="Meaning", width=220),
+        ],
+        sizing_mode="stretch_width",
+        height=300,
+        sortable=False,
+        reorderable=False,
+        index_position=None,
+    )
+    zscore_metrics_div = Div(text="<p>Run a test to inspect z-score distribution, percentiles and threshold hit-rates.</p>")
 
     equity_plot = _build_figure("Equity", state.shared_x_range, "Unrealized DD", 440)
     equity_plot.extra_y_ranges = {"equity": Range1d(start=0.0, end=1.0)}
@@ -539,7 +637,6 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         if show_stop_z:
             columns.append(TableColumn(field="stop_z_label", title="Stop Z", width=72))
         columns.extend([
-            TableColumn(field="bollinger_k", title="Boll K", formatter=NumberFormatter(format="0.0"), width=72),
             TableColumn(field="win_rate", title="Win", formatter=NumberFormatter(format="0.000"), width=66),
             TableColumn(field="gross_profit", title="Gross", formatter=NumberFormatter(format="0.00"), width=88),
             TableColumn(field="spread_cost", title="Spread", formatter=NumberFormatter(format="0.00"), width=86),
@@ -590,11 +687,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     scan_det_order_input = Spinner(
         title="det_order",
         low=-1,
-        high=2,
+        high=1,
         step=1,
         value=0,
         width=105,
-        description="Johansen deterministic term setting. Value 0 is the usual constant-without-trend baseline.",
+        description="Johansen deterministic term setting. statsmodels coint_johansen supports only -1 (none), 0 (constant), 1 (linear trend).",
     )
     scan_k_ar_diff_input = Spinner(
         title="k_ar_diff",
@@ -651,7 +748,161 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         index_position=None,
     )
 
-    trades_content = column(trades_table, sizing_mode="stretch_width")
+    def _selected_symbols_for_export() -> tuple[str, str]:
+        symbol_1 = str(symbol_1_select.value or "na")
+        symbol_2 = str(symbol_2_select.value or "na")
+        if symbol_1 == INSTRUMENT_PLACEHOLDER:
+            symbol_1 = "na"
+        if symbol_2 == INSTRUMENT_PLACEHOLDER:
+            symbol_2 = "na"
+        return symbol_1, symbol_2
+
+    def _format_export_period(raw_start: object, raw_end: object) -> str:
+        started_at = _coerce_datetime(raw_start)
+        ended_at = _coerce_datetime(raw_end)
+        return f"{started_at:%Y-%m-%d %H:%M} .. {ended_at:%Y-%m-%d %H:%M} UTC"
+
+    def _format_manual_range(start: object, stop: object, step: object) -> str:
+        return f"{start} .. {stop} step {step}"
+
+    def _tester_export_metadata() -> list[tuple[str, object]]:
+        defaults = build_defaults()
+        params = build_distance_params()
+        return [
+            ("Algorithm", algorithm_select.value),
+            ("Test Period", _format_export_period(period_slider.value[0], period_slider.value[1])),
+            ("Fee Mode", bybit_fee_mode_select.value),
+            ("Initial Capital", defaults.initial_capital),
+            ("Leverage", defaults.leverage),
+            ("Margin Budget Per Leg", defaults.margin_budget_per_leg),
+            ("Slippage Points", defaults.slippage_points),
+            ("Lookback Bars", params.lookback_bars),
+            ("Entry Z", params.entry_z),
+            ("Exit Z", params.exit_z),
+            ("Stop Mode", stop_mode_select.value),
+            ("Stop Z", "disabled" if params.stop_z is None else params.stop_z),
+            ("Bollinger K", params.bollinger_k),
+        ]
+
+    def _optimization_export_metadata() -> list[tuple[str, object]]:
+        defaults = build_defaults()
+        metadata: list[tuple[str, object]] = [
+            ("Mode", optimization_mode_select.value),
+            ("Objective", optimization_objective_select.value),
+            ("Range Mode", optimization_range_mode_select.value),
+            ("Optimization Period", _format_export_period(optimization_period_slider.value[0], optimization_period_slider.value[1])),
+            ("Fee Mode", bybit_fee_mode_select.value),
+            ("Initial Capital", defaults.initial_capital),
+            ("Leverage", defaults.leverage),
+            ("Margin Budget Per Leg", defaults.margin_budget_per_leg),
+            ("Slippage Points", defaults.slippage_points),
+            ("Lookback Range", _format_manual_range(opt_lookback_start.value, opt_lookback_stop.value, opt_lookback_step.value)),
+            ("Entry Z Range", _format_manual_range(opt_entry_start.value, opt_entry_stop.value, opt_entry_step.value)),
+            ("Exit Z Range", _format_manual_range(opt_exit_start.value, opt_exit_stop.value, opt_exit_step.value)),
+            ("Stop Mode", opt_stop_mode_select.value),
+            ("Stop Z Range", "disabled" if opt_stop_mode_select.value == "disabled" else _format_manual_range(opt_stop_start.value, opt_stop_stop.value, opt_stop_step.value)),
+            ("Bollinger K", bollinger_input.value),
+        ]
+        if optimization_mode_select.value == OptimizationMode.GENETIC.value:
+            metadata.extend(
+                [
+                    ("Population Size", genetic_population_input.value),
+                    ("Generations", genetic_generations_input.value),
+                    ("Elite Count", genetic_elite_input.value),
+                    ("Mutation Rate", genetic_mutation_input.value),
+                    ("Random Seed", genetic_seed_input.value if genetic_seed_input.value is not None else "none"),
+                ]
+            )
+        else:
+            metadata.append(("Auto Grid Target Trials", auto_grid_trials_input.value))
+        return metadata
+
+    def _scan_export_metadata() -> list[tuple[str, object]]:
+        return [
+            ("Universe", scan_universe_select.value),
+            ("Type", scan_kind_select.value),
+            ("Unit Root Gate", scan_unit_root_select.value),
+            ("Significance", scan_significance_select.value),
+            ("det_order", scan_det_order_input.value),
+            ("k_ar_diff", scan_k_ar_diff_input.value),
+            ("Scan Period", _format_export_period(scan_period_slider.value[0], scan_period_slider.value[1])),
+        ]
+
+    def _build_table_export_controls(
+        *,
+        block_name: str,
+        table: DataTable,
+        extra_metadata_builder,
+    ):
+        button = Button(label="Save XLSX", width=104)
+        status = Div(text="", sizing_mode="stretch_width")
+
+        def on_export_click() -> None:
+            symbol_1, symbol_2 = _selected_symbols_for_export()
+            try:
+                metadata = metadata_rows_from_mapping(
+                    [
+                        ("Export Block", block_name),
+                        ("Exported At UTC", datetime.now(UTC)),
+                        ("Symbol 1", symbol_1),
+                        ("Symbol 2", symbol_2),
+                        ("Timeframe", timeframe_select.value),
+                        *list(extra_metadata_builder()),
+                    ]
+                )
+                path = export_table_to_xlsx(
+                    table=table,
+                    block_name=block_name,
+                    symbol_1=symbol_1,
+                    symbol_2=symbol_2,
+                    timeframe=timeframe_select.value,
+                    metadata_rows=metadata,
+                )
+                try:
+                    relative_path = path.relative_to(Path(__file__).resolve().parents[2])
+                except ValueError:
+                    relative_path = path
+                status.text = f"<p>Saved <b>{block_name}</b> to <b>{relative_path}</b>.</p>"
+            except Exception as exc:
+                status.text = f"<p>Failed to save <b>{block_name}</b>: {exc}</p>"
+
+        button.on_click(on_export_click)
+        return row(button, status, sizing_mode="stretch_width", styles={"gap": "12px", "align-items": "center"})
+
+    trades_export_controls = _build_table_export_controls(
+        block_name="trades",
+        table=trades_table,
+        extra_metadata_builder=_tester_export_metadata,
+    )
+    zscore_metrics_export_controls = _build_table_export_controls(
+        block_name="zscore_metrics",
+        table=zscore_metrics_table,
+        extra_metadata_builder=_tester_export_metadata,
+    )
+    optimization_export_controls = _build_table_export_controls(
+        block_name="optimization_results",
+        table=optimization_table,
+        extra_metadata_builder=_optimization_export_metadata,
+    )
+    scan_export_controls = _build_table_export_controls(
+        block_name="johansen_scan_results",
+        table=scan_table,
+        extra_metadata_builder=_scan_export_metadata,
+    )
+
+    trades_content = column(trades_export_controls, trades_table, sizing_mode="stretch_width", styles={"gap": "10px"})
+    zscore_metrics_content = column(
+        zscore_metrics_div,
+        zscore_metrics_export_controls,
+        row(
+            zscore_metrics_table,
+            zscore_hist_plot,
+            sizing_mode="stretch_width",
+            styles={"gap": "18px", "align-items": "stretch"},
+        ),
+        sizing_mode="stretch_width",
+        styles={"gap": "12px"},
+    )
     optimization_run_button.width = 172
     optimization_shared_controls = row(
         optimization_mode_control,
@@ -688,13 +939,6 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         opt_stop_step_control,
         width=160,
     )
-    optimization_bollinger_controls = row(
-        opt_bollinger_start_control,
-        opt_bollinger_stop_control,
-        opt_bollinger_step_control,
-        sizing_mode="stretch_width",
-        styles={"gap": "14px", "align-items": "flex-end"},
-    )
     optimization_genetic_controls = row(
         genetic_population_control,
         genetic_generations_control,
@@ -705,7 +949,6 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         styles={"gap": "14px", "align-items": "flex-end"},
     )
     optimization_tail_controls = column(
-        optimization_bollinger_controls,
         optimization_genetic_controls,
         sizing_mode="stretch_width",
         styles={"gap": "12px"},
@@ -728,8 +971,10 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     )
     optimization_content = column(
         optimization_controls,
+        optimization_export_controls,
         optimization_table,
         sizing_mode="stretch_width",
+        styles={"gap": "10px"},
     )
     scan_controls = column(
         row(
@@ -747,7 +992,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         scan_status_div,
         sizing_mode="stretch_width",
     )
-    scan_content = column(scan_controls, scan_table, sizing_mode="stretch_width")
+    scan_content = column(scan_controls, scan_export_controls, scan_table, sizing_mode="stretch_width", styles={"gap": "10px"})
     download_controls = column(
         row(
             download_scope_select,
@@ -828,11 +1073,12 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         value=(_ui_datetime(history_start), _ui_datetime(now_utc)),
         sizing_mode="stretch_width",
     )
+    wfa_objective_select = Select(title="Objective", value="score_log_trades", options=OBJECTIVE_OPTIONS, width=150)
     wfa_unit_select = Select(title="Unit", value=WfaWindowUnit.WEEKS.value, options=WFA_UNIT_OPTIONS, width=96)
     wfa_lookback_input = Spinner(title="Lookback", low=1, step=1, value=8, width=92)
     wfa_test_input = Spinner(title="Test", low=1, step=1, value=2, width=92)
     wfa_run_button = Button(label="Run WFA", button_type="primary", width=120)
-    wfa_status_div = Div(text="<p>Ready to run rolling WFA on the selected tester pair using genetic optimization and Score.</p>")
+    wfa_status_div = Div(text="<p>Ready to run rolling WFA on the selected tester pair using genetic optimization and the selected objective.</p>")
     wfa_table_source = ColumnDataSource(empty_wfa_table_data())
     wfa_equity_source = ColumnDataSource({"time": [], "equity": []})
     wfa_equity_plot = figure(
@@ -892,6 +1138,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     )
     wfa_controls = column(
         row(
+            wfa_objective_select,
             wfa_unit_select,
             wfa_lookback_input,
             wfa_test_input,
@@ -904,8 +1151,29 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         sizing_mode="stretch_width",
         styles={"gap": "10px"},
     )
+    def _wfa_export_metadata() -> list[tuple[str, object]]:
+        defaults = build_defaults()
+        return [
+            ("WFA Period", _format_export_period(wfa_period_slider.value[0], wfa_period_slider.value[1])),
+            ("Objective", wfa_objective_select.value),
+            ("Unit", wfa_unit_select.value),
+            ("Lookback Windows", wfa_lookback_input.value),
+            ("Test Windows", wfa_test_input.value),
+            ("Fee Mode", bybit_fee_mode_select.value),
+            ("Initial Capital", defaults.initial_capital),
+            ("Leverage", defaults.leverage),
+            ("Margin Budget Per Leg", defaults.margin_budget_per_leg),
+            ("Slippage Points", defaults.slippage_points),
+        ]
+
+    wfa_export_controls = _build_table_export_controls(
+        block_name="wfa_folds",
+        table=wfa_table,
+        extra_metadata_builder=_wfa_export_metadata,
+    )
     wfa_outputs = column(
         wfa_equity_plot,
+        wfa_export_controls,
         wfa_table,
         sizing_mode="stretch_width",
         visible=False,
@@ -996,6 +1264,12 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         default_meta_oos_date = now_utc
 
     meta_model_select = Select(title="Model", value=default_meta_model(), options=list(SUPPORTED_META_MODELS), width=140)
+    meta_objective_select = Select(
+        title="Objective",
+        value=str(wfa_objective_select.value or "score_log_trades"),
+        options=OBJECTIVE_OPTIONS,
+        width=150,
+    )
     meta_oos_start_picker = DatePicker(
         title="OOS Start",
         value=default_meta_oos_date.date().isoformat(),
@@ -1014,6 +1288,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     meta_xgb_learning_rate_input = Spinner(title="LR", low=0.01, high=1.0, step=0.01, value=0.05, width=80)
     meta_xgb_subsample_input = Spinner(title="Subsample", low=0.1, high=1.0, step=0.05, value=0.9, width=96)
     meta_xgb_colsample_input = Spinner(title="Colsample", low=0.1, high=1.0, step=0.05, value=0.9, width=96)
+    meta_xgb_early_stopping_rounds_input = Spinner(title="Early Stop", low=1, high=1000, step=1, value=30, width=96)
     meta_run_button = Button(label="Run Meta Selector", button_type="primary", width=170)
     meta_status_div = Div(text="<p>Ready to learn from saved WFA optimization history before the chosen OOS date for the selected tester pair and timeframe.</p>")
     meta_table_source = ColumnDataSource(empty_meta_selector_table_data())
@@ -1033,6 +1308,12 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         meta_wheel_zoom.modifiers = {"ctrl": True}
     meta_equity_plot.toolbar.autohide = True
     meta_equity_plot.yaxis.axis_label = "Equity"
+    meta_oos_cutoff_span = Span(location=0.0, dimension="height", line_color="#dc2626", line_alpha=0.55, line_width=2, visible=False)
+    meta_selected_fold_box = BoxAnnotation(fill_color="#7c3aed", fill_alpha=0.08, line_color="#7c3aed", line_alpha=0.30, line_width=2, visible=False)
+    meta_selected_fold_span = Span(location=0.0, dimension="height", line_color="#7c3aed", line_alpha=0.85, line_width=2, visible=False)
+    meta_equity_plot.add_layout(meta_selected_fold_box)
+    meta_equity_plot.add_layout(meta_oos_cutoff_span)
+    meta_equity_plot.add_layout(meta_selected_fold_span)
     meta_equity_plot.line("time", "equity", source=meta_equity_source, line_width=2.5, color="#7c3aed")
     meta_ranking_title = Div(text="<p><b>Meta Robustness Grid</b></p>")
     meta_ranking_table = DataTable(
@@ -1109,6 +1390,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         meta_xgb_learning_rate_input,
         meta_xgb_subsample_input,
         meta_xgb_colsample_input,
+        meta_xgb_early_stopping_rounds_input,
         sizing_mode="stretch_width",
         styles={"gap": "12px", "align-items": "flex-end"},
     )
@@ -1122,6 +1404,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     meta_controls = column(
         row(
             meta_model_select,
+            meta_objective_select,
             meta_oos_start_picker,
             meta_run_button,
             sizing_mode="stretch_width",
@@ -1134,12 +1417,34 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         sizing_mode="stretch_width",
         styles={"gap": "10px"},
     )
+    def _meta_export_metadata() -> list[tuple[str, object]]:
+        model_config = normalized_model_config(str(meta_model_select.value or ""), build_meta_model_config())
+        return [
+            ("Model", meta_model_select.value),
+            ("Meta Objective", meta_objective_select.value),
+            ("WFA Objective", wfa_objective_select.value),
+            ("OOS Start", meta_oos_start_picker.value or "unset"),
+            ("Model Config", model_config),
+        ]
+
+    meta_ranking_export_controls = _build_table_export_controls(
+        block_name="meta_robustness_grid",
+        table=meta_ranking_table,
+        extra_metadata_builder=_meta_export_metadata,
+    )
+    meta_selected_export_controls = _build_table_export_controls(
+        block_name="selected_oos_folds",
+        table=meta_table,
+        extra_metadata_builder=_meta_export_metadata,
+    )
     meta_content = column(
         meta_controls,
         meta_equity_plot,
         meta_ranking_title,
+        meta_ranking_export_controls,
         meta_ranking_table,
         meta_selected_title,
+        meta_selected_export_controls,
         meta_table,
         sizing_mode="stretch_width",
         styles={"gap": "10px"},
@@ -1189,6 +1494,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     zscore_section, zscore_body, zscore_toggle = _build_section("Z-score + Bollinger", zscore_plot)
     equity_section, equity_body, equity_toggle = _build_section("Equity", equity_plot)
     trades_block, trades_body, trades_toggle = _build_section("Trades", trades_content)
+    zscore_metrics_block, zscore_metrics_body, zscore_metrics_toggle = _build_section("Z-score Metrics", zscore_metrics_content)
     optimization_block, optimization_body, optimization_toggle = _build_section("Optimization Results", optimization_content)
     display_block, display_body, display_toggle = _build_section("Display", display_content)
     wfa_block, wfa_body, wfa_toggle = _build_section("WFA", wfa_content)
@@ -1224,6 +1530,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     ]
     block_bindings = [
         ("trades", trades_body, trades_toggle),
+        ("zscore_metrics", zscore_metrics_body, zscore_metrics_toggle),
         ("optimization", optimization_body, optimization_toggle),
         ("display", display_body, display_toggle),
         ("wfa", wfa_body, wfa_toggle),
@@ -1237,6 +1544,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         BrowserStateBinding("symbol_1", symbol_1_select, kind="select", restore_on_options_change=True),
         BrowserStateBinding("symbol_2", symbol_2_select, kind="select", restore_on_options_change=True),
         BrowserStateBinding("leg2_filter_mode", leg_2_filter_select, kind="select"),
+        BrowserStateBinding("co_mover_group", co_mover_group_select, kind="select", restore_on_options_change=True),
         BrowserStateBinding("leg2_cointegration_kind", leg_2_cointegration_kind_select, kind="select"),
         BrowserStateBinding("timeframe", timeframe_select, kind="select"),
         BrowserStateBinding("test_period", period_slider, kind="range"),
@@ -1270,9 +1578,6 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         BrowserStateBinding("opt_stop_start", opt_stop_start),
         BrowserStateBinding("opt_stop_stop", opt_stop_stop),
         BrowserStateBinding("opt_stop_step", opt_stop_step),
-        BrowserStateBinding("opt_bollinger_start", opt_bollinger_start),
-        BrowserStateBinding("opt_bollinger_stop", opt_bollinger_stop),
-        BrowserStateBinding("opt_bollinger_step", opt_bollinger_step),
         BrowserStateBinding("genetic_population", genetic_population_input),
         BrowserStateBinding("genetic_generations", genetic_generations_input),
         BrowserStateBinding("genetic_elite", genetic_elite_input),
@@ -1284,10 +1589,12 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         BrowserStateBinding("plot_height_three", plot_height_three_input),
         BrowserStateBinding("plot_height_four", plot_height_four_input),
         BrowserStateBinding("wfa_period", wfa_period_slider, kind="range"),
+        BrowserStateBinding("wfa_objective", wfa_objective_select, kind="select"),
         BrowserStateBinding("wfa_unit", wfa_unit_select, kind="select"),
         BrowserStateBinding("wfa_lookback", wfa_lookback_input),
         BrowserStateBinding("wfa_test", wfa_test_input),
         BrowserStateBinding("meta_model", meta_model_select, kind="select"),
+        BrowserStateBinding("meta_objective", meta_objective_select, kind="select"),
         BrowserStateBinding("meta_oos_start", meta_oos_start_picker),
         BrowserStateBinding("meta_tree_max_depth", meta_tree_max_depth_input),
         BrowserStateBinding("meta_tree_min_samples_leaf", meta_tree_min_samples_leaf_input),
@@ -1300,6 +1607,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         BrowserStateBinding("meta_xgb_learning_rate", meta_xgb_learning_rate_input),
         BrowserStateBinding("meta_xgb_subsample", meta_xgb_subsample_input),
         BrowserStateBinding("meta_xgb_colsample_bytree", meta_xgb_colsample_input),
+        BrowserStateBinding("meta_xgb_early_stopping_rounds", meta_xgb_early_stopping_rounds_input),
         BrowserStateBinding("scan_universe", scan_universe_select, kind="select"),
         BrowserStateBinding("scan_kind", scan_kind_select, kind="select"),
         BrowserStateBinding("scan_unit_root", scan_unit_root_select, kind="select"),
@@ -1318,6 +1626,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         BrowserStateBinding("show_zscore", zscore_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_equity", equity_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_trades", trades_body, property_name="visible", kind="visible"),
+        BrowserStateBinding("show_zscore_metrics", zscore_metrics_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_optimization", optimization_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_display", display_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_wfa", wfa_body, property_name="visible", kind="visible"),
@@ -1474,7 +1783,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         major_font_px = max(8, base_font_px)
         title_font_px = base_font_px + 1
         hover_font_px = max(9, base_font_px)
-        for plot in [*plots, wfa_equity_plot]:
+        for plot in [*plots, wfa_equity_plot, zscore_hist_plot]:
             plot.title.text_font_size = f"{title_font_px}px"
             for axis in [*plot.xaxis, *plot.yaxis]:
                 axis.major_label_text_font_size = f"{major_font_px}px"
@@ -1624,6 +1933,70 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             span.location = location
             span.visible = should_show
 
+    def clear_zscore_diagnostics_outputs() -> None:
+        zscore_metrics_source.data = empty_zscore_metric_source()
+        zscore_hist_source.data = empty_zscore_hist_source()
+        zscore_metrics_div.text = "<p>Run a test to inspect z-score distribution, percentiles and threshold hit-rates.</p>"
+        zscore_hist_plot.x_range.start = -1.0
+        zscore_hist_plot.x_range.end = 1.0
+        zscore_hist_plot.y_range.start = 0.0
+        zscore_hist_plot.y_range.end = 1.0
+        zscore_hist_plot.xaxis.ticker = FixedTicker(ticks=[-1.0, 0.0, 1.0])
+        for span in [
+            zscore_hist_entry_pos_span,
+            zscore_hist_entry_neg_span,
+            zscore_hist_exit_pos_span,
+            zscore_hist_exit_neg_span,
+            zscore_hist_stop_pos_span,
+            zscore_hist_stop_neg_span,
+        ]:
+            span.visible = False
+
+    def apply_zscore_diagnostics(frame: pl.DataFrame, params: DistanceParameters) -> None:
+        payload = build_zscore_diagnostics(
+            frame,
+            entry_z=float(params.entry_z),
+            exit_z=float(params.exit_z),
+            stop_z=None if params.stop_z is None else float(params.stop_z),
+        )
+        zscore_metrics_source.data = payload.metrics_source
+        zscore_hist_source.data = payload.histogram_source
+        zscore_metrics_div.text = payload.summary_html
+        zscore_hist_plot.x_range.start = float(payload.histogram_x_start)
+        zscore_hist_plot.x_range.end = float(payload.histogram_x_end)
+        zscore_hist_plot.y_range.start = 0.0
+        zscore_hist_plot.y_range.end = float(payload.histogram_y_end)
+        tick_start = int(ceil(float(payload.histogram_x_start)))
+        tick_end = int(floor(float(payload.histogram_x_end)))
+        if tick_end < tick_start:
+            tick_values = [0.0]
+        else:
+            tick_values = [float(value) for value in range(tick_start, tick_end + 1)]
+        zscore_hist_plot.xaxis.ticker = FixedTicker(ticks=tick_values)
+
+        zscore_hist_entry_pos_span.location = float(payload.entry_threshold)
+        zscore_hist_entry_neg_span.location = -float(payload.entry_threshold)
+        zscore_hist_entry_pos_span.visible = True
+        zscore_hist_entry_neg_span.visible = True
+
+        if payload.exit_threshold is None:
+            zscore_hist_exit_pos_span.visible = False
+            zscore_hist_exit_neg_span.visible = False
+        else:
+            zscore_hist_exit_pos_span.location = float(payload.exit_threshold)
+            zscore_hist_exit_neg_span.location = -float(payload.exit_threshold)
+            zscore_hist_exit_pos_span.visible = True
+            zscore_hist_exit_neg_span.visible = True
+
+        if payload.stop_threshold is None:
+            zscore_hist_stop_pos_span.visible = False
+            zscore_hist_stop_neg_span.visible = False
+        else:
+            zscore_hist_stop_pos_span.location = float(payload.stop_threshold)
+            zscore_hist_stop_neg_span.location = -float(payload.stop_threshold)
+            zscore_hist_stop_pos_span.visible = True
+            zscore_hist_stop_neg_span.visible = True
+
     def clear_backtest_outputs(message: str) -> bool:
         sources = empty_backtest_sources()
         state.price_1_source.data = sources["price_1"]
@@ -1638,6 +2011,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         state.trade_segments_2.data = sources["segments_2"]
         state.trades_source.selected.indices = []
         clear_trade_highlights()
+        clear_zscore_diagnostics_outputs()
         state.shared_x_range.start = 0
         state.shared_x_range.end = 1
         rebalance_layout()
@@ -1807,6 +2181,26 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     def sync_downloader_mode_ui() -> None:
         download_symbol_select.visible = download_scope_select.value == "symbol"
 
+    def sync_leg_2_filter_ui() -> None:
+        is_co_movers = leg_2_filter_select.value == "co_movers"
+        is_cointegrated = leg_2_filter_select.value == "cointegrated_only"
+        co_mover_group_select.visible = is_co_movers
+        leg_2_cointegration_kind_select.visible = is_cointegrated
+
+    def _sync_co_mover_group_options(current_symbol_1: str, allowed_options: list[str]) -> list[str]:
+        if current_symbol_1 == INSTRUMENT_PLACEHOLDER:
+            co_mover_group_select.options = [NO_CO_MOVER_GROUP_LABEL]
+            co_mover_group_select.value = NO_CO_MOVER_GROUP_LABEL
+            return []
+        group_labels = co_mover_group_labels_for_symbol(current_symbol_1, available_symbols=allowed_options)
+        if not group_labels:
+            co_mover_group_select.options = [NO_CO_MOVER_GROUP_LABEL]
+            co_mover_group_select.value = NO_CO_MOVER_GROUP_LABEL
+            return []
+        co_mover_group_select.options = group_labels
+        if co_mover_group_select.value not in group_labels:
+            co_mover_group_select.value = group_labels[0]
+        return group_labels
 
     def current_tester_cointegration_scope() -> tuple[ScanUniverseMode, str | None]:
         if group_select.value != 'all':
@@ -1866,6 +2260,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         return snapshot
 
     def sync_symbol_2_filter(*, base_options: list[str] | None = None, show_message: bool) -> None:
+        sync_leg_2_filter_ui()
         options = list(base_options or instrument_options_for_group(group_select.value))
         if not options:
             options = [INSTRUMENT_PLACEHOLDER]
@@ -1875,9 +2270,47 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         if symbol_1_select.value != current_symbol_1:
             symbol_1_select.value = current_symbol_1
 
-        if leg_2_filter_select.value != 'cointegrated_only':
+        if leg_2_filter_select.value == 'all_symbols':
             symbol_2_select.options = options
             symbol_2_select.value = _preferred_symbol_2(options, symbol_2_select.value, current_symbol_1)
+            return
+
+        if leg_2_filter_select.value == 'co_movers':
+            group_labels = _sync_co_mover_group_options(current_symbol_1, options)
+            if current_symbol_1 == INSTRUMENT_PLACEHOLDER:
+                symbol_2_select.options = [INSTRUMENT_PLACEHOLDER]
+                symbol_2_select.value = INSTRUMENT_PLACEHOLDER
+                return
+            if not group_labels:
+                symbol_2_select.options = [INSTRUMENT_PLACEHOLDER]
+                symbol_2_select.value = INSTRUMENT_PLACEHOLDER
+                if show_message:
+                    summary_div.text = (
+                        f"<p>No local co-mover groups are defined for <b>{current_symbol_1}</b> "
+                        f"inside the current tester universe <b>{group_select.value}</b>.</p>"
+                    )
+                return
+            partner_options = co_mover_symbols_for_symbol(
+                current_symbol_1,
+                available_symbols=options,
+                group_label=co_mover_group_select.value,
+            )
+            if not partner_options:
+                symbol_2_select.options = [INSTRUMENT_PLACEHOLDER]
+                symbol_2_select.value = INSTRUMENT_PLACEHOLDER
+                if show_message:
+                    summary_div.text = (
+                        f"<p>Co-mover group <b>{co_mover_group_select.value}</b> has no eligible Symbol 2 candidates "
+                        f"for <b>{current_symbol_1}</b> inside the current tester universe <b>{group_select.value}</b>.</p>"
+                    )
+                return
+            symbol_2_select.options = partner_options
+            symbol_2_select.value = _preferred_symbol_2(partner_options, symbol_2_select.value, current_symbol_1)
+            if show_message:
+                summary_div.text = (
+                    f"<p>Leg 2 filter loaded <b>{len(partner_options)}</b> local co-movers for <b>{current_symbol_1}</b> "
+                    f"from <b>{co_mover_group_select.value}</b>.</p>"
+                )
             return
 
         if current_symbol_1 == INSTRUMENT_PLACEHOLDER:
@@ -2020,12 +2453,6 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
                 "integer": False,
                 "disabled": opt_stop_mode_select.value == "disabled",
             },
-            "bollinger_k": {
-                "start": float(_read_spinner_value(opt_bollinger_start, 1.5)),
-                "stop": float(_read_spinner_value(opt_bollinger_stop, 2.5)),
-                "integer": False,
-                "disabled": False,
-            },
         }
         counts = _auto_grid_point_counts(bounds, target_trials)
         variable_keys = [name for name, bound in bounds.items() if not bound.get("disabled") and float(bound["stop"]) > float(bound["start"])]
@@ -2093,11 +2520,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
                 "stop": float(_read_spinner_value(opt_stop_stop, 4.0)),
                 "step": float(_read_spinner_value(opt_stop_step, 0.5)),
             },
-            "bollinger_k": {
-                "start": float(_read_spinner_value(opt_bollinger_start, 1.5)),
-                "stop": float(_read_spinner_value(opt_bollinger_stop, 2.5)),
-                "step": float(_read_spinner_value(opt_bollinger_step, 0.5)),
-            },
+            "bollinger_k": float(_read_spinner_value(bollinger_input, 2.0)),
         }
 
     def genetic_optimizer_config() -> dict[str, float | int]:
@@ -2155,7 +2578,7 @@ if (!targets.length) {
         is_auto = optimization_range_mode_select.value == "auto"
         set_optimizer_control_visible(optimization_range_mode_select, not is_genetic)
         set_optimizer_control_visible(auto_grid_trials_input, (not is_genetic) and is_auto)
-        for widget in [opt_lookback_step, opt_entry_step, opt_exit_step, opt_bollinger_step]:
+        for widget in [opt_lookback_step, opt_entry_step, opt_exit_step]:
             set_optimizer_control_visible(widget, (not is_genetic) and (not is_auto))
         set_optimizer_control_visible(opt_stop_step, (not is_genetic) and (not is_auto) and opt_stop_mode_select.value == "enabled")
         for widget in [genetic_population_input, genetic_generations_input, genetic_elite_input, genetic_mutation_input, genetic_seed_input]:
@@ -2182,6 +2605,159 @@ if (!targets.length) {
         stage = str(optimization_progress.get("stage", "Optimization"))
         if total > 0:
             optimization_status_div.text = f"<p>{stage}: <b>{completed}</b> / <b>{total}</b> evaluated using <b>{optimizer_parallel_workers}</b> workers.</p>"
+
+    def _serialize_optimization_signature_value(value: object) -> object:
+        if isinstance(value, datetime):
+            return serialize_time(value if value.tzinfo else value.replace(tzinfo=UTC))
+        if isinstance(value, dict):
+            return {str(key): _serialize_optimization_signature_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_serialize_optimization_signature_value(item) for item in value]
+        return value
+
+    def optimization_signature(
+        *,
+        pair: PairSelection,
+        timeframe: Timeframe,
+        started_at: datetime,
+        ended_at: datetime,
+        mode_value: str,
+        objective_metric: str,
+        search_space: dict[str, object],
+        defaults: StrategyDefaults,
+        fee_mode: str,
+        config: dict[str, object] | None,
+    ) -> dict[str, object]:
+        return {
+            "symbol_1": pair.symbol_1,
+            "symbol_2": pair.symbol_2,
+            "timeframe": timeframe.value,
+            "started_at": serialize_time(started_at),
+            "ended_at": serialize_time(ended_at),
+            "mode": str(mode_value or ""),
+            "objective_metric": str(objective_metric or ""),
+            "search_space": _serialize_optimization_signature_value(search_space),
+            "defaults": _serialize_optimization_signature_value(
+                {
+                    "initial_capital": float(defaults.initial_capital),
+                    "leverage": float(defaults.leverage),
+                    "margin_budget_per_leg": float(defaults.margin_budget_per_leg),
+                    "slippage_points": float(defaults.slippage_points),
+                }
+            ),
+            "fee_mode": str(fee_mode or ""),
+            "config": _serialize_optimization_signature_value(config or {}),
+        }
+
+    def optimization_signature_matches(left: dict[str, object] | None, right: dict[str, object] | None) -> bool:
+        if left is None or right is None:
+            return False
+        return json.dumps(left, sort_keys=True, default=str) == json.dumps(right, sort_keys=True, default=str)
+
+    def optimization_outputs_present() -> bool:
+        return bool(state.optimization_source.data.get("trial_id", []))
+
+    def apply_optimization_trial(
+        index: int,
+        *,
+        period_override: tuple[datetime, datetime] | None = None,
+    ) -> tuple[bool, object | None, tuple[datetime, datetime]]:
+        data = state.optimization_source.data
+        trial_ids = list(data.get("trial_id", []))
+        # UX contract:
+        # Optimizer row replay always runs charts on the current tester period.
+        # Optimization Period belongs only to the optimizer job itself and must
+        # never overwrite tester dates when a result row is replayed.
+        period = period_override or (
+            _coerce_datetime(period_slider.value[0]),
+            _coerce_datetime(period_slider.value[1]),
+        )
+        if index < 0 or index >= len(trial_ids):
+            return False, None, period
+
+        lookback_input.value = int(data["lookback_bars"][index])
+        entry_input.value = float(data["entry_z"][index])
+        exit_input.value = float(data["exit_z"][index])
+        raw_stop = data["stop_z"][index]
+        if raw_stop in (None, ""):
+            stop_mode_select.value = "disabled"
+        else:
+            stop_mode_select.value = "enabled"
+            stop_input.value = float(raw_stop)
+        bollinger_input.value = float(data["bollinger_k"][index])
+        ran = apply_backtest_result(period_override=period)
+        return ran, trial_ids[index], period
+
+    def current_optimization_signature() -> dict[str, object] | None:
+        pair = current_pair()
+        if pair is None:
+            return None
+        started_at = _coerce_datetime(optimization_period_slider.value[0])
+        ended_at = _coerce_datetime(optimization_period_slider.value[1])
+        if ended_at <= started_at:
+            return None
+        return optimization_signature(
+            pair=pair,
+            timeframe=Timeframe(timeframe_select.value),
+            started_at=started_at,
+            ended_at=ended_at,
+            mode_value=str(optimization_mode_select.value or ""),
+            objective_metric=str(optimization_objective_select.value or "net_profit"),
+            search_space=optimization_search_space(),
+            defaults=build_defaults(),
+            fee_mode=str(bybit_fee_mode_select.value or ""),
+            config=genetic_optimizer_config() if optimization_mode_select.value == OptimizationMode.GENETIC.value else None,
+        )
+
+    def optimization_signature_changes(
+        previous: dict[str, object] | None,
+        current: dict[str, object] | None,
+    ) -> list[str]:
+        if previous is None or current is None:
+            return []
+        labels = [
+            ("symbol_1", "symbol 1"),
+            ("symbol_2", "symbol 2"),
+            ("timeframe", "timeframe"),
+            ("started_at", "period start"),
+            ("ended_at", "period end"),
+            ("mode", "mode"),
+            ("objective_metric", "objective"),
+            ("search_space", "optimizer ranges"),
+            ("defaults", "capital / leverage / budget / slippage"),
+            ("fee_mode", "fee mode"),
+            ("config", "genetic settings"),
+        ]
+        changed: list[str] = []
+        for key, label in labels:
+            if not optimization_signature_matches(
+                {"value": previous.get(key)},
+                {"value": current.get(key)},
+            ):
+                changed.append(label)
+        return changed
+
+    def on_optimization_config_change(_attr: str, _old: object, _new: object) -> None:
+        tester_started_at = _coerce_datetime(period_slider.value[0])
+        tester_ended_at = _coerce_datetime(period_slider.value[1])
+        sync_optimization_cutoff_marker(test_started_at=tester_started_at, test_ended_at=tester_ended_at)
+        current_signature = current_optimization_signature()
+        if not optimization_outputs_present() or displayed_optimization_signature is None or current_signature is None:
+            return
+        if optimization_signature_matches(displayed_optimization_signature, current_signature):
+            return
+        shown_started = str(displayed_optimization_signature.get("started_at") or "").replace("T", " ").replace("Z", " UTC")
+        shown_ended = str(displayed_optimization_signature.get("ended_at") or "").replace("T", " ").replace("Z", " UTC")
+        current_started = str(current_signature.get("started_at") or "").replace("T", " ").replace("Z", " UTC")
+        current_ended = str(current_signature.get("ended_at") or "").replace("T", " ").replace("Z", " UTC")
+        changed_parts = optimization_signature_changes(displayed_optimization_signature, current_signature)
+        changed_label = ", ".join(changed_parts) if changed_parts else "optimizer settings"
+        optimization_status_div.text = (
+            f"<p>Showing the last optimization table for <b>{shown_started}</b> .. <b>{shown_ended}</b>, "
+            f"but the current optimizer configuration changed: <b>{changed_label}</b>. "
+            f"Current target period: <b>{current_started}</b> .. <b>{current_ended}</b>. "
+            f"Run Optimization again to refresh the table for the current settings.</p>"
+        )
 
     def reset_scan_button() -> None:
         scan_run_button.label = "Run Johansen Scan"
@@ -2305,11 +2881,67 @@ if (!targets.length) {
         meta_equity_plot.y_range.start = y_low - padding
         meta_equity_plot.y_range.end = y_high + padding
 
+    def _coerce_meta_datetime(value: object) -> datetime | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=UTC)
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def sync_meta_oos_cutoff_marker(oos_started_at: object) -> None:
+        cutoff_at = _coerce_meta_datetime(oos_started_at)
+        if cutoff_at is None:
+            meta_oos_cutoff_span.visible = False
+            return
+        meta_oos_cutoff_span.location = cutoff_at
+        meta_oos_cutoff_span.visible = True
+
+    def clear_meta_selection_highlight() -> None:
+        meta_selected_fold_box.visible = False
+        meta_selected_fold_span.visible = False
+
+    def sync_meta_selection_highlight() -> None:
+        indices = list(meta_table_source.selected.indices)
+        if not indices:
+            clear_meta_selection_highlight()
+            return
+        index = indices[0]
+        data = meta_table_source.data
+        starts = data.get("test_started_at", [])
+        ends = data.get("test_ended_at", [])
+        if index >= len(starts) or index >= len(ends):
+            clear_meta_selection_highlight()
+            return
+        started_at = _coerce_meta_datetime(starts[index])
+        ended_at = _coerce_meta_datetime(ends[index])
+        if started_at is None or ended_at is None:
+            clear_meta_selection_highlight()
+            return
+        meta_selected_fold_box.left = started_at
+        meta_selected_fold_box.right = ended_at
+        meta_selected_fold_box.visible = True
+        meta_selected_fold_span.location = started_at
+        meta_selected_fold_span.visible = True
+
     def read_meta_oos_started_at() -> datetime | None:
         raw_value = meta_oos_start_picker.value
         if raw_value in (None, ""):
             return None
         return datetime.fromisoformat(str(raw_value)).replace(tzinfo=UTC)
+
+    def same_meta_oos_started_at(saved_value: object, current_value: datetime | None) -> bool:
+        if saved_value in (None, "") and current_value is None:
+            return True
+        if saved_value in (None, "") or current_value is None:
+            return False
+        try:
+            saved_dt = datetime.fromisoformat(str(saved_value).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return saved_dt == current_value
 
     def build_meta_model_config() -> dict[str, float | int | str]:
         if meta_model_select.value == "decision_tree":
@@ -2330,7 +2962,138 @@ if (!targets.length) {
             "learning_rate": float(_read_spinner_value(meta_xgb_learning_rate_input, 0.05)),
             "subsample": float(_read_spinner_value(meta_xgb_subsample_input, 0.9)),
             "colsample_bytree": float(_read_spinner_value(meta_xgb_colsample_input, 0.9)),
+            "early_stopping_rounds": int(_read_spinner_value(meta_xgb_early_stopping_rounds_input, 30, cast=int)),
         }
+
+    def clear_meta_outputs() -> None:
+        nonlocal displayed_meta_signature
+        meta_table_source.data = empty_meta_selector_table_data()
+        meta_table_source.selected.indices = []
+        meta_ranking_source.data = empty_meta_ranking_table_data()
+        meta_ranking_source.selected.indices = []
+        meta_equity_source.data = {"time": [], "equity": []}
+        clear_meta_selection_highlight()
+        sync_meta_oos_cutoff_marker(None)
+        refresh_meta_equity_ranges()
+        displayed_meta_signature = None
+
+    def meta_outputs_present() -> bool:
+        return bool(
+            meta_table_source.data.get("fold")
+            or meta_ranking_source.data.get("rank")
+            or meta_equity_source.data.get("time")
+        )
+
+    def meta_result_signature(result: dict[str, object], *, fallback_pair: PairSelection | None = None) -> dict[str, object]:
+        result_pair = result.get("pair")
+        pair_payload = result_pair if isinstance(result_pair, dict) else {}
+        model_type = str(result.get("model_type") or meta_model_select.value or "")
+        model_config = normalized_model_config(model_type, dict(result.get("model_config") or {}))
+        return {
+            "symbol_1": str(pair_payload.get("symbol_1") or (fallback_pair.symbol_1 if fallback_pair is not None else "")),
+            "symbol_2": str(pair_payload.get("symbol_2") or (fallback_pair.symbol_2 if fallback_pair is not None else "")),
+            "timeframe": str(result.get("timeframe") or timeframe_select.value or ""),
+            "model_type": model_type,
+            "objective_metric": str(result.get("selected_objective_metric") or result.get("source_objective_metric") or ""),
+            "oos_started_at": result.get("oos_started_at"),
+            "model_config": model_config,
+        }
+
+    def can_keep_displayed_meta_result(pair: PairSelection, model_type: str) -> bool:
+        if not meta_outputs_present() or displayed_meta_signature is None:
+            return False
+        return (
+            str(displayed_meta_signature.get("symbol_1") or "") == pair.symbol_1
+            and str(displayed_meta_signature.get("symbol_2") or "") == pair.symbol_2
+            and str(displayed_meta_signature.get("timeframe") or "") == timeframe_select.value
+            and str(displayed_meta_signature.get("model_type") or "") == model_type
+        )
+
+    def restore_saved_meta_result(*, show_message: bool = False) -> None:
+        if meta_future is not None and not meta_future.done():
+            return
+        pair = current_pair()
+        if pair is None:
+            clear_meta_outputs()
+            return
+        model_type = str(meta_model_select.value or "")
+        current_objective_metric = str(meta_objective_select.value or wfa_objective_select.value or "score_log_trades")
+        current_oos_started_at = read_meta_oos_started_at()
+        current_model_config = normalized_model_config(model_type, build_meta_model_config())
+        keep_displayed = can_keep_displayed_meta_result(pair, model_type)
+        saved = load_saved_meta_selector_result(
+            broker=broker,
+            pair=pair,
+            timeframe=Timeframe(timeframe_select.value),
+            model_type=model_type,
+        )
+        if saved is None:
+            if not keep_displayed:
+                clear_meta_outputs()
+            if show_message and meta_body.visible:
+                meta_status_div.text = (
+                    f"<p>No saved Meta Selector result for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on "
+                    f"<b>{timeframe_select.value}</b> with model <b>{model_type}</b>.</p>"
+                )
+            elif keep_displayed:
+                meta_status_div.text = (
+                    f"<p>Showing the last loaded Meta Selector result for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>, "
+                    f"but no saved snapshot exists for the current selector state. Run Meta Selector again to refresh the grid.</p>"
+                )
+            return
+        saved_objective_metric = str(saved.get("selected_objective_metric", "") or saved.get("source_objective_metric", "") or "")
+        if saved_objective_metric and saved_objective_metric != current_objective_metric:
+            if not keep_displayed:
+                clear_meta_outputs()
+            if show_message and meta_body.visible:
+                meta_status_div.text = (
+                    f"<p>Saved Meta Selector result exists, but it was built with objective <b>{saved_objective_metric}</b> "
+                    f"while the current selector is <b>{current_objective_metric}</b>. Run Meta Selector again for the current objective.</p>"
+                )
+            elif keep_displayed:
+                meta_status_div.text = (
+                    f"<p>Showing the last loaded Meta Selector result, but the current meta objective is <b>{current_objective_metric}</b> "
+                    f"while the shown grid was built with <b>{saved_objective_metric}</b>. Run Meta Selector again to refresh it.</p>"
+                )
+            return
+        if not same_meta_oos_started_at(saved.get("oos_started_at"), current_oos_started_at):
+            if not keep_displayed:
+                clear_meta_outputs()
+            if show_message and meta_body.visible:
+                meta_status_div.text = (
+                    f"<p>Saved Meta Selector result exists, but its OOS start does not match the current selector. "
+                    f"Run Meta Selector again for the current OOS cutoff.</p>"
+                )
+            elif keep_displayed:
+                saved_oos_label = "full history" if saved.get("oos_started_at") in (None, "") else str(saved.get("oos_started_at")).replace("T00:00:00Z", "").replace("Z", " UTC")
+                current_oos_label = "full history" if current_oos_started_at is None else f"{current_oos_started_at:%Y-%m-%d}"
+                meta_status_div.text = (
+                    f"<p>Showing the last loaded Meta Selector result, but the current OOS start is <b>{current_oos_label}</b> "
+                    f"while the shown grid was built with <b>{saved_oos_label}</b>. Run Meta Selector again to refresh it.</p>"
+                )
+            return
+        saved_model_config = normalized_model_config(model_type, dict(saved.get("model_config") or {}))
+        if saved_model_config != current_model_config:
+            if not keep_displayed:
+                clear_meta_outputs()
+            if show_message and meta_body.visible:
+                meta_status_div.text = (
+                    f"<p>Saved Meta Selector result exists, but its model parameters do not match the current selector. "
+                    f"Run Meta Selector again for the current model config.</p>"
+                )
+            elif keep_displayed:
+                meta_status_div.text = (
+                    f"<p>Showing the last loaded Meta Selector result, but the current model parameters differ from the shown grid. "
+                    f"Run Meta Selector again to refresh it.</p>"
+                )
+            return
+        complete_meta(saved, pair)
+        if show_message:
+            meta_status_div.text = (
+                f"<p>Loaded saved Meta Selector result for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> using "
+                f"<b>{saved.get('model_type') or model_type}</b>. Selected folds: "
+                f"<b>{len(saved.get('selected_folds', []) or [])}</b>, ranking rows: <b>{len(saved.get('ranking_rows', []) or [])}</b>.</p>"
+            )
 
     def restore_saved_wfa_result(*, show_message: bool = False) -> None:
         if wfa_future is not None and not wfa_future.done():
@@ -2344,6 +3107,7 @@ if (!targets.length) {
             return
         lookback_units = int(_read_spinner_value(wfa_lookback_input, 8, cast=int))
         test_units = int(_read_spinner_value(wfa_test_input, 2, cast=int))
+        objective_metric = str(wfa_objective_select.value or "score_log_trades")
         snapshot = load_wfa_run_snapshot(
             broker=broker,
             pair=pair,
@@ -2354,6 +3118,7 @@ if (!targets.length) {
             test_units=test_units,
             step_units=test_units,
             unit=WfaWindowUnit(wfa_unit_select.value),
+            objective_metric=objective_metric,
         )
         if snapshot is None:
             wfa_table_source.data = empty_wfa_table_data()
@@ -2365,7 +3130,7 @@ if (!targets.length) {
             if show_message and wfa_body.visible:
                 wfa_status_div.text = (
                     f"<p>No saved WFA result for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on "
-                    f"<b>{timeframe_select.value}</b> and the selected WFA settings.</p>"
+                    f"<b>{timeframe_select.value}</b> with objective <b>{objective_metric}</b> and the selected WFA settings.</p>"
                 )
             return
         apply_wfa_snapshot(snapshot, final=True)
@@ -2374,7 +3139,8 @@ if (!targets.length) {
         if show_message:
             wfa_status_div.text = (
                 f"<p>Loaded saved WFA result for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
-                f"Folds: <b>{int(snapshot.get('fold_count', 0) or 0)}</b>, stitched net: "
+                f"Objective: <b>{snapshot.get('objective_metric') or objective_metric}</b>, "
+                f"folds: <b>{int(snapshot.get('fold_count', 0) or 0)}</b>, stitched net: "
                 f"<b>{float(snapshot.get('total_net_profit', 0.0) or 0.0):.2f}</b>.</p>"
             )
 
@@ -2428,6 +3194,7 @@ if (!targets.length) {
             return
         wfa_status_div.text = (
             f"<p>WFA completed for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
+            f"Objective: <b>{result.get('objective_metric') or 'score_log_trades'}</b>, "
             f"Folds: <b>{int(result.get('fold_count', 0) or 0)}</b>, "
             f"stitched net: <b>{float(result.get('total_net_profit', 0.0) or 0.0):.2f}</b>, "
             f"trades: <b>{int(result.get('total_trades', 0) or 0)}</b>, "
@@ -2445,6 +3212,7 @@ if (!targets.length) {
         lookback_units: int,
         test_units: int,
         unit_value: str,
+        objective_metric: str,
     ) -> dict[str, object]:
         wfa_progress["completed"] = 0
         wfa_progress["total"] = 0
@@ -2456,7 +3224,7 @@ if (!targets.length) {
             started_at=started_at,
             ended_at=ended_at,
             defaults=defaults,
-            objective_metric="score_log_trades",
+            objective_metric=objective_metric,
             parameter_search_space=optimization_search_space(),
             genetic_config=genetic_optimizer_config(),
             lookback_units=lookback_units,
@@ -2521,6 +3289,7 @@ if (!targets.length) {
             return
         lookback_units = int(_read_spinner_value(wfa_lookback_input, 8, cast=int))
         test_units = int(_read_spinner_value(wfa_test_input, 2, cast=int))
+        objective_metric = str(wfa_objective_select.value or "score_log_trades")
         if lookback_units <= 0 or test_units <= 0:
             wfa_status_div.text = "<p>Lookback and Test must be positive integers.</p>"
             return
@@ -2539,7 +3308,7 @@ if (!targets.length) {
         wfa_status_div.text = (
             f"<p>Running WFA for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
             f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b> with lookback <b>{lookback_units}</b> {wfa_unit_select.value} and test <b>{test_units}</b> {wfa_unit_select.value}."
-            f" Objective is fixed to <b>score_log_trades</b>.</p>"
+            f" Objective: <b>{objective_metric}</b>.</p>"
         )
         wfa_future = wfa_executor.submit(
             lambda: (
@@ -2552,6 +3321,7 @@ if (!targets.length) {
                     lookback_units,
                     test_units,
                     wfa_unit_select.value,
+                    objective_metric,
                 ),
                 pair,
             )
@@ -2568,12 +3338,16 @@ if (!targets.length) {
         meta_run_button.button_type = "warning"
 
     def complete_meta(result: dict[str, object], pair: PairSelection) -> None:
+        nonlocal displayed_meta_signature
         meta_table_source.data = meta_selector_result_to_source(result)
         meta_table_source.selected.indices = []
         meta_ranking_source.data = meta_ranking_result_to_source(result)
         meta_ranking_source.selected.indices = []
         meta_equity_source.data = meta_result_to_equity_source(result)
+        clear_meta_selection_highlight()
+        sync_meta_oos_cutoff_marker(result.get("oos_started_at"))
         refresh_meta_equity_ranges()
+        displayed_meta_signature = meta_result_signature(result, fallback_pair=pair)
         failure_reason = str(result.get("failure_reason", "") or "")
         oos_started_at_raw = result.get("oos_started_at")
         oos_label = "full history" if oos_started_at_raw in (None, "") else str(oos_started_at_raw).replace("T00:00:00Z", "").replace("Z", " UTC")
@@ -2598,8 +3372,45 @@ if (!targets.length) {
         validation_r2 = result.get("validation_r2")
         mae_label = "n/a" if validation_mae is None else f"{float(validation_mae or 0.0):.4f}"
         r2_label = "n/a" if validation_r2 is None else f"{float(validation_r2 or 0.0):.4f}"
+        quality_metrics = dict(result.get("quality_metrics") or {})
+        train_r2_metric = quality_metrics.get("train_r2")
+        train_r2_label = "n/a" if train_r2_metric is None else f"{float(train_r2_metric or 0.0):.4f}"
+        validation_r2_metric = quality_metrics.get("validation_r2")
+        validation_r2_detail_label = "n/a" if validation_r2_metric is None else f"{float(validation_r2_metric or 0.0):.4f}"
+        train_quality_label = (
+            "n/a"
+            if not quality_metrics
+            else (
+                f"MAE {float(quality_metrics.get('train_mae', 0.0) or 0.0):.4f}, "
+                f"MSE {float(quality_metrics.get('train_mse', 0.0) or 0.0):.4f}, "
+                f"RMSE {float(quality_metrics.get('train_rmse', 0.0) or 0.0):.4f}, "
+                f"R2 {train_r2_label}"
+            )
+        )
+        validation_quality_label = (
+            "n/a"
+            if quality_metrics.get("validation_mae") is None
+            else (
+                f"MAE {float(quality_metrics.get('validation_mae', 0.0) or 0.0):.4f}, "
+                f"MSE {float(quality_metrics.get('validation_mse', 0.0) or 0.0):.4f}, "
+                f"RMSE {float(quality_metrics.get('validation_rmse', 0.0) or 0.0):.4f}, "
+                f"R2 {validation_r2_detail_label}"
+            )
+        )
+        xgb_quality_sentence = ""
+        if result.get("model_type") == "xgboost":
+            xgb_quality_sentence = (
+                f" XGB early stop: <b>{int(quality_metrics.get('xgboost_early_stopping_rounds', 0) or 0)}</b>, "
+                f"best iter: <b>{quality_metrics.get('xgboost_best_iteration', 'n/a')}</b>, "
+                f"best trees: <b>{quality_metrics.get('xgboost_best_n_estimators', 'n/a')}</b>, "
+                f"final trees: <b>{quality_metrics.get('xgboost_final_n_estimators', 'n/a')}</b>."
+            )
         source_wfa_run_id = str(result.get("source_wfa_run_id", "") or "")
+        source_objective_metric = str(result.get("source_objective_metric", "") or "")
+        selected_objective_metric = str(result.get("selected_objective_metric", "") or source_objective_metric or "")
         source_wfa_run_sentence = "" if not source_wfa_run_id else f" WFA run: <b>{source_wfa_run_id}</b>."
+        objective_sentence = "" if not selected_objective_metric else f" Meta objective: <b>{selected_objective_metric}</b>."
+        source_objective_sentence = "" if not source_objective_metric or source_objective_metric == selected_objective_metric else f" WFA objective: <b>{source_objective_metric}</b>."
         meta_status_div.text = (
             f"<p>Meta Selector completed for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> using <b>{result.get('model_type')}</b>. "
             f"OOS start: <b>{oos_label}</b>, pre-OOS rows: <b>{int(result.get('train_rows', 0) or 0)}</b>, "
@@ -2609,14 +3420,17 @@ if (!targets.length) {
             f"<b>{float(result.get('stitched_net_profit', 0.0) or 0.0):.2f}</b>, stitched max DD: "
             f"<b>{float(result.get('stitched_max_drawdown', 0.0) or 0.0):.2f}</b>, trades: "
             f"<b>{int(result.get('stitched_total_trades', 0) or 0)}</b>. "
-            f"MAE: <b>{mae_label}</b>, R2: <b>{r2_label}</b>. "
-            f"History: <b>{result.get('history_path') or 'n/a'}</b>.{source_wfa_run_sentence}</p>"
+            f"Validation MAE: <b>{mae_label}</b>, Validation R2: <b>{r2_label}</b>.<br>"
+            f"Train quality: <b>{train_quality_label}</b>.<br>"
+            f"Validation quality: <b>{validation_quality_label}</b>.{xgb_quality_sentence}<br>"
+            f"History: <b>{result.get('history_path') or 'n/a'}</b>.{source_wfa_run_sentence}{objective_sentence}{source_objective_sentence}</p>"
         )
 
     def run_meta_job(
         pair: PairSelection,
         timeframe: Timeframe,
         model_type: str,
+        objective_metric: str,
         oos_started_at: datetime | None,
         model_config: dict[str, float | int],
     ) -> dict[str, object]:
@@ -2626,6 +3440,7 @@ if (!targets.length) {
             timeframe=timeframe,
             model_type=model_type,
             target_metric=DEFAULT_META_TARGET,
+            objective_metric=objective_metric,
             defaults=build_defaults(),
             oos_started_at=oos_started_at,
             model_config=model_config,
@@ -2670,15 +3485,16 @@ if (!targets.length) {
             return
         model_config = build_meta_model_config()
         oos_started_at = read_meta_oos_started_at()
+        objective_metric = str(meta_objective_select.value or wfa_objective_select.value or "score_log_trades")
         oos_label = "full history" if oos_started_at is None else f"{oos_started_at:%Y-%m-%d}"
         mark_meta_running()
         meta_status_div.text = (
             f"<p>Running Meta Selector for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe_select.value}</b> "
-            f"using <b>{meta_model_select.value}</b>, OOS start <b>{oos_label}</b> and target <b>{DEFAULT_META_TARGET}</b>.</p>"
+            f"using <b>{meta_model_select.value}</b>, objective <b>{objective_metric}</b> and OOS start <b>{oos_label}</b>.</p>"
         )
         meta_future = meta_executor.submit(
             lambda: (
-                run_meta_job(pair, Timeframe(timeframe_select.value), meta_model_select.value, oos_started_at, model_config),
+                run_meta_job(pair, Timeframe(timeframe_select.value), meta_model_select.value, objective_metric, oos_started_at, model_config),
                 pair,
             )
         )
@@ -2686,6 +3502,11 @@ if (!targets.length) {
             meta_poll_callback = doc.add_periodic_callback(poll_meta_future, 250)
 
     def on_meta_selection(_attr: str, _old: object, _new: object) -> None:
+        # UX contract:
+        # Clicking a Selected OOS Folds row copies only that fold's strategy
+        # parameters into the tester and replays charts on the current tester
+        # period. It must not mutate tester dates or rebuild the fold table.
+        sync_meta_selection_highlight()
         indices = meta_table_source.selected.indices
         if not indices:
             return
@@ -2713,6 +3534,11 @@ if (!targets.length) {
             )
 
     def on_meta_ranking_selection(_attr: str, _old: object, _new: object) -> None:
+        # UX contract:
+        # Clicking a Meta Robustness Grid row replays that ranked parameter set
+        # on the current tester period only. It must not overwrite tester dates
+        # and must not be interpreted as "rebuild Selected OOS Folds by this row".
+        clear_meta_selection_highlight()
         indices = meta_ranking_source.selected.indices
         if not indices:
             return
@@ -2740,35 +3566,72 @@ if (!targets.length) {
             )
 
     def complete_optimization(result: DistanceOptimizationResult, mode_label: str, pair: PairSelection) -> None:
+        nonlocal displayed_optimization_signature, optimization_summary_html, suppress_optimization_selection
         state.optimization_source.data = optimization_results_to_source(result)
         state.optimization_source.selected.indices = []
+        request_context = optimization_request_context or {}
+        requested_started_at = request_context.get("started_at")
+        requested_ended_at = request_context.get("ended_at")
+        range_label = ""
+        if isinstance(requested_started_at, datetime) and isinstance(requested_ended_at, datetime):
+            range_label = (
+                f" Period: <b>{requested_started_at:%Y-%m-%d %H:%M}</b> .. "
+                f"<b>{requested_ended_at:%Y-%m-%d %H:%M} UTC</b>."
+            )
+        signature_payload = request_context.get("signature")
+        displayed_optimization_signature = dict(signature_payload) if isinstance(signature_payload, dict) else None
         if not result.rows:
             if result.cancelled:
-                optimization_status_div.text = "<p>Optimization stopped before evaluating any trials.</p>"
+                optimization_summary_html = "<p>Optimization stopped before evaluating any trials.</p>"
             elif result.failure_reason == "no_aligned_quotes":
-                optimization_status_div.text = (
-                    f"<p>No aligned parquet data for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on the selected optimization period and timeframe.</p>"
+                optimization_summary_html = (
+                    f"<p>No aligned parquet data for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on the selected optimization period and timeframe.{range_label}</p>"
                 )
             elif result.failure_reason == "no_valid_parameter_combinations":
                 stop_rule = " and <b>entry_z &lt; stop_z</b>" if opt_stop_mode_select.value == "enabled" else ""
-                optimization_status_div.text = f"<p>Optimizer ranges produced zero valid combinations. Use values that satisfy <b>exit_z &lt; entry_z</b>{stop_rule}.</p>"
+                optimization_summary_html = f"<p>Optimizer ranges produced zero valid combinations.{range_label} Use values that satisfy <b>exit_z &lt; entry_z</b>{stop_rule}. Negative <b>exit_z</b> means exit on the opposite z-score signal.</p>"
             else:
-                optimization_status_div.text = "<p>No trials evaluated. Check optimizer ranges and parquet coverage.</p>"
+                optimization_summary_html = f"<p>No trials evaluated.{range_label} Check optimizer ranges and parquet coverage.</p>"
+            optimization_status_div.text = optimization_summary_html
             return
 
         best = result.rows[0]
         if result.cancelled:
-            optimization_status_div.text = (
+            optimization_summary_html = (
                 f"<p>Stopped {mode_label} optimization for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> "
                 f"after {result.evaluated_trials} trials. Best partial objective: {best.objective_score:.3f}, "
-                f"Net: {best.net_profit:.2f}, Max DD: {best.max_drawdown:.2f}.</p>"
+                f"Net: {best.net_profit:.2f}, Max DD: {best.max_drawdown:.2f}.{range_label}</p>"
             )
+            optimization_status_div.text = optimization_summary_html
             return
 
-        optimization_status_div.text = (
+        optimization_summary_html = (
             f"<p>Evaluated {result.evaluated_trials} {mode_label} trials for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
-            f"Best objective: {best.objective_score:.3f}, Net: {best.net_profit:.2f}, Max DD: {best.max_drawdown:.2f}.</p>"
+            f"Best objective: {best.objective_score:.3f}, Net: {best.net_profit:.2f}, Max DD: {best.max_drawdown:.2f}.{range_label}</p>"
         )
+        optimization_status_div.text = optimization_summary_html
+        # UX contract:
+        # Auto-previewing the best optimizer row must use the current tester
+        # period for chart replay, exactly like a manual row click.
+        ran, trial_id, tester_period = apply_optimization_trial(0)
+        suppress_optimization_selection = True
+        try:
+            state.optimization_source.selected.indices = [0]
+        finally:
+            suppress_optimization_selection = False
+        if ran:
+            optimization_status_div.text = (
+                f"{optimization_summary_html}"
+                f"<p>Rendered best trial <b>{trial_id}</b> on tester period "
+                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            )
+        else:
+            optimization_status_div.text = (
+                f"{optimization_summary_html}"
+                f"<p>Best trial <b>{trial_id}</b> was selected, but the chart did not run on tester period "
+                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b> "
+                f"because aligned data is missing.</p>"
+            )
 
 
     def apply_backtest_result(*, period_override: tuple[datetime, datetime] | None = None) -> bool:
@@ -2784,14 +3647,16 @@ if (!targets.length) {
             ended_at = _coerce_datetime(period_slider.value[1])
         else:
             started_at, ended_at = period_override
+        defaults = build_defaults()
+        params = build_distance_params()
         result = run_distance_backtest(
             broker=broker,
             pair=pair,
             timeframe=Timeframe(timeframe_select.value),
             started_at=started_at,
             ended_at=ended_at,
-            defaults=build_defaults(),
-            params=build_distance_params(),
+            defaults=defaults,
+            params=params,
         )
         if result.frame.is_empty():
             return clear_backtest_outputs(
@@ -2813,6 +3678,7 @@ if (!targets.length) {
         state.trade_segments_2.data = sources["segments_2"]
         state.trades_source.selected.indices = []
         clear_trade_highlights()
+        apply_zscore_diagnostics(result.frame, params)
 
         x_values = [float(value) for value in sources["price_1"].get("x", [])]
         state.shared_x_range.start = 0.0
@@ -2839,32 +3705,43 @@ if (!targets.length) {
         options = instrument_options_for_group(selected_group)
         symbol_1_select.options = options
         symbol_1_select.value = _preferred_symbol_1(options, symbol_1_select.value)
-        sync_symbol_2_filter(base_options=options, show_message=leg_2_filter_select.value == 'cointegrated_only')
+        sync_symbol_2_filter(base_options=options, show_message=leg_2_filter_select.value != 'all_symbols')
         sync_downloader_symbol_options(show_message=False)
-        if leg_2_filter_select.value != 'cointegrated_only':
+        if leg_2_filter_select.value == 'all_symbols':
             visible_count = len([option for option in options if option != INSTRUMENT_PLACEHOLDER])
             summary_div.text = f"<p>Loaded {visible_count} instruments for group '{selected_group}'.</p>"
 
     def on_group_change(_attr: str, _old: object, _new: object) -> None:
         refresh_instruments()
+        on_optimization_config_change(_attr, _old, _new)
 
     def on_symbol_1_change(_attr: str, _old: object, _new: object) -> None:
-        sync_symbol_2_filter(show_message=leg_2_filter_select.value == 'cointegrated_only')
+        sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
         restore_saved_wfa_result(show_message=False)
+        restore_saved_meta_result(show_message=False)
+        on_optimization_config_change(_attr, _old, _new)
 
     def on_symbol_2_change(_attr: str, _old: object, _new: object) -> None:
         restore_saved_wfa_result(show_message=False)
+        restore_saved_meta_result(show_message=False)
+        on_optimization_config_change(_attr, _old, _new)
 
     def on_leg2_filter_change(_attr: str, _old: object, _new: object) -> None:
-        sync_symbol_2_filter(show_message=leg_2_filter_select.value == 'cointegrated_only')
+        sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
 
     def on_leg2_cointegration_kind_change(_attr: str, _old: object, _new: object) -> None:
-        sync_symbol_2_filter(show_message=leg_2_filter_select.value == 'cointegrated_only')
+        sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
+
+    def on_co_mover_group_change(_attr: str, _old: object, _new: object) -> None:
+        if leg_2_filter_select.value == "co_movers":
+            sync_symbol_2_filter(show_message=True)
 
     def on_timeframe_change(_attr: str, _old: object, _new: object) -> None:
-        sync_symbol_2_filter(show_message=leg_2_filter_select.value == 'cointegrated_only')
+        sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
         restore_saved_scan_table(show_message=True)
         restore_saved_wfa_result(show_message=False)
+        restore_saved_meta_result(show_message=False)
+        on_optimization_config_change(_attr, _old, _new)
 
     def on_scan_universe_change(_attr: str, _old: object, _new: object) -> None:
         restore_saved_scan_table(show_message=True)
@@ -2887,24 +3764,31 @@ if (!targets.length) {
 
     def on_bybit_fee_mode_change(_attr: str, _old: object, new: object) -> None:
         sync_bybit_fee_mode()
+        on_optimization_config_change(_attr, _old, new)
         summary_div.text = f"<p>Bybit fee mode set to <b>{new}</b>. Next test and optimization runs will use this commission model.</p>"
 
     def on_optimization_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_optimization_mode_ui()
+        on_optimization_config_change(_attr, _old, _new)
 
     def on_stop_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_stop_mode_ui()
 
     def on_opt_stop_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_optimization_mode_ui()
+        on_optimization_config_change(_attr, _old, _new)
 
     def on_optimization_range_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_optimization_mode_ui()
+        on_optimization_config_change(_attr, _old, _new)
 
     def on_display_settings_change(_attr: str, _old: object, _new: object) -> None:
         apply_plot_display_settings()
         rebalance_layout()
         refresh_plot_ranges()
+
+    def on_meta_config_change(_attr: str, _old: object, _new: object) -> None:
+        restore_saved_meta_result(show_message=False)
 
     def on_section_visibility_change(_attr: str, _old: object, _new: object) -> None:
         rebalance_layout()
@@ -2941,31 +3825,26 @@ if (!targets.length) {
         sync_wfa_selection_highlight()
 
     def on_optimization_selection(_attr: str, _old: object, _new: object) -> None:
+        if suppress_optimization_selection:
+            return
         indices = state.optimization_source.selected.indices
         if not indices:
             return
 
-        tester_period = (
-            _coerce_datetime(period_slider.value[0]),
-            _coerce_datetime(period_slider.value[1]),
-        )
         index = indices[0]
-        data = state.optimization_source.data
-        lookback_input.value = int(data["lookback_bars"][index])
-        entry_input.value = float(data["entry_z"][index])
-        exit_input.value = float(data["exit_z"][index])
-        raw_stop = data["stop_z"][index]
-        if raw_stop in (None, ""):
-            stop_mode_select.value = "disabled"
-        else:
-            stop_mode_select.value = "enabled"
-            stop_input.value = float(raw_stop)
-        bollinger_input.value = float(data["bollinger_k"][index])
-        ran = apply_backtest_result(period_override=tester_period)
+        ran, trial_id, tester_period = apply_optimization_trial(index)
         if ran:
             optimization_status_div.text = (
-                f"<p>Trial <b>{data['trial_id'][index]}</b> copied into tester inputs and executed on tester period "
+                f"{optimization_summary_html}"
+                f"<p>Trial <b>{trial_id}</b> copied into tester inputs and executed on tester period "
                 f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            )
+        else:
+            optimization_status_div.text = (
+                f"{optimization_summary_html}"
+                f"<p>Trial <b>{trial_id}</b> copied into tester inputs, but the backtest did not run on tester period "
+                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b> "
+                f"because aligned data is missing.</p>"
             )
 
     def on_scan_selection(_attr: str, _old: object, _new: object) -> None:
@@ -3011,7 +3890,9 @@ if (!targets.length) {
         search_space: dict[str, dict[str, float | int]],
         objective_metric: str,
         config: dict[str, float | int] | None,
-    ) -> tuple[DistanceOptimizationResult, str, PairSelection]:
+        request_context: dict[str, object],
+        cancel_check,
+    ) -> tuple[DistanceOptimizationResult, str, PairSelection, dict[str, object]]:
         optimization_progress["completed"] = 0
         optimization_progress["total"] = 0
         optimization_progress["stage"] = "Preparing optimization"
@@ -3026,11 +3907,13 @@ if (!targets.length) {
                 search_space=search_space,
                 objective_metric=objective_metric,
                 config=config,
-                cancel_check=optimization_cancel_event.is_set,
+                cancel_check=cancel_check,
                 parallel_workers=optimizer_parallel_workers,
                 progress_callback=update_optimization_progress,
             )
-            return result, "genetic", pair
+            return result, "genetic", pair, request_context
+        if mode_value != OptimizationMode.GRID.value:
+            raise ValueError(f"Unsupported optimization mode: {mode_value}")
 
         result = optimize_distance_grid(
             broker=broker,
@@ -3041,11 +3924,11 @@ if (!targets.length) {
             defaults=defaults,
             search_space=search_space,
             objective_metric=objective_metric,
-            cancel_check=optimization_cancel_event.is_set,
+            cancel_check=cancel_check,
             parallel_workers=optimizer_parallel_workers,
             progress_callback=update_optimization_progress,
         )
-        return result, "grid", pair
+        return result, "grid", pair, request_context
 
     def clear_optimization_poll_callback() -> None:
         nonlocal optimization_poll_callback
@@ -3058,7 +3941,7 @@ if (!targets.length) {
         optimization_poll_callback = None
 
     def poll_optimization_future() -> None:
-        nonlocal optimization_future
+        nonlocal optimization_future, optimization_request_context
         if optimization_future is None:
             return
         if not optimization_future.done():
@@ -3071,15 +3954,15 @@ if (!targets.length) {
         reset_optimization_button()
 
         try:
-            result, mode_label, pair = future.result()
+            result, mode_label, pair, request_context = future.result()
         except Exception as exc:  # pragma: no cover - runtime UI path
             optimization_status_div.text = f"<p>Optimization failed: {exc}</p>"
             return
-
+        optimization_request_context = request_context
         complete_optimization(result, mode_label, pair)
 
     def on_run_optimization() -> None:
-        nonlocal optimization_future, optimization_poll_callback
+        nonlocal optimization_future, optimization_poll_callback, optimization_request_context
 
         if optimization_future is not None and not optimization_future.done():
             if optimization_cancel_event.is_set():
@@ -3104,30 +3987,63 @@ if (!targets.length) {
 
         started_at = _coerce_datetime(optimization_period_slider.value[0])
         ended_at = _coerce_datetime(optimization_period_slider.value[1])
+        if ended_at <= started_at:
+            optimization_status_div.text = "<p>Optimization Period is invalid. End must be after start.</p>"
+            return
         search_space = optimization_search_space()
         defaults = build_defaults()
         timeframe = Timeframe(timeframe_select.value)
-        objective_metric = optimization_objective_select.value
-        config = genetic_optimizer_config() if optimization_mode_select.value == OptimizationMode.GENETIC.value else None
+        mode_value = str(optimization_mode_select.value or "")
+        if mode_value not in OPTIMIZATION_MODE_OPTIONS:
+            optimization_status_div.text = f"<p>Unsupported optimization mode selected: <b>{mode_value or 'empty'}</b>.</p>"
+            return
+        objective_metric = str(optimization_objective_select.value or "net_profit")
+        config = genetic_optimizer_config() if mode_value == OptimizationMode.GENETIC.value else None
+        optimization_request_context = {
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "signature": optimization_signature(
+                pair=pair,
+                timeframe=timeframe,
+                started_at=started_at,
+                ended_at=ended_at,
+                mode_value=mode_value,
+                objective_metric=objective_metric,
+                search_space=search_space,
+                defaults=defaults,
+                fee_mode=str(bybit_fee_mode_select.value or ""),
+                config=config,
+            ),
+        }
 
         valid_trial_count = count_distance_parameter_grid(search_space)
-        optimization_cancel_event.clear()
+        if valid_trial_count <= 0:
+            stop_rule = " and <b>entry_z &lt; stop_z</b>" if opt_stop_mode_select.value == "enabled" else ""
+            optimization_status_div.text = (
+                f"<p>Optimizer ranges produced zero valid combinations. "
+                f"Use values that satisfy <b>exit_z &lt; entry_z</b>{stop_rule}. "
+                f"Descending ranges are allowed, so <b>Start</b> may be greater than <b>Stop</b>. "
+                f"Negative <b>exit_z</b> means exit on the opposite z-score signal.</p>"
+            )
+            return
+        optimization_cancel_event = Event()
         optimization_progress["completed"] = 0
         optimization_progress["total"] = valid_trial_count
         optimization_progress["stage"] = "Preparing optimization"
         mark_optimization_running()
-        mode_label = "genetic" if optimization_mode_select.value == OptimizationMode.GENETIC.value else "grid"
+        mode_label = mode_value
         auto_suffix = ""
-        if optimization_mode_select.value != OptimizationMode.GENETIC.value and optimization_range_mode_select.value == "auto":
+        if mode_value != OptimizationMode.GENETIC.value and optimization_range_mode_select.value == "auto":
             auto_target = max(1, int(_read_spinner_value(auto_grid_trials_input, 500, cast=int)))
             auto_suffix = f" Auto target: <b>{auto_target}</b>."
         optimization_status_div.text = (
             f"<p>Running {mode_label} optimization for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
+            f"Optimization period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
             f"Valid combinations: {valid_trial_count}.{auto_suffix} Workers: <b>{optimizer_parallel_workers}</b>. Click the button again to stop.</p>"
         )
         optimization_future = optimization_executor.submit(
             run_optimization_job,
-            optimization_mode_select.value,
+            mode_value,
             pair,
             timeframe,
             started_at,
@@ -3136,6 +4052,8 @@ if (!targets.length) {
             search_space,
             objective_metric,
             config,
+            optimization_request_context,
+            optimization_cancel_event.is_set,
         )
         if optimization_poll_callback is None:
             optimization_poll_callback = doc.add_periodic_callback(poll_optimization_future, 250)
@@ -3518,6 +4436,7 @@ if (!targets.length) {
         timeframe_select.value = Timeframe.M15.value
         period_slider.value = (_ui_datetime(history_start), _ui_datetime(now_utc))
         leg_2_filter_select.value = 'all_symbols'
+        co_mover_group_select.value = ALL_CO_MOVERS_LABEL
         leg_2_cointegration_kind_select.value = COINTEGRATION_KIND_OPTIONS[0]
         algorithm_select.value = "distance"
         capital_input.value = 10_000.0
@@ -3549,9 +4468,6 @@ if (!targets.length) {
         opt_stop_start.value = 3.0
         opt_stop_stop.value = 4.0
         opt_stop_step.value = 0.5
-        opt_bollinger_start.value = 1.5
-        opt_bollinger_stop.value = 2.5
-        opt_bollinger_step.value = 0.5
         genetic_population_input.value = 24
         genetic_generations_input.value = 12
         genetic_elite_input.value = 4
@@ -3563,10 +4479,12 @@ if (!targets.length) {
         plot_height_three_input.value = 320
         plot_height_four_input.value = 260
         wfa_period_slider.value = (_ui_datetime(history_start), _ui_datetime(now_utc))
+        wfa_objective_select.value = "score_log_trades"
         wfa_unit_select.value = WfaWindowUnit.WEEKS.value
         wfa_lookback_input.value = 8
         wfa_test_input.value = 2
         meta_model_select.value = default_meta_model()
+        meta_objective_select.value = str(wfa_objective_select.value or "score_log_trades")
         meta_oos_start_picker.value = default_meta_oos_date.date().isoformat()
         meta_tree_max_depth_input.value = 5
         meta_tree_min_samples_leaf_input.value = 6
@@ -3579,6 +4497,7 @@ if (!targets.length) {
         meta_xgb_learning_rate_input.value = 0.05
         meta_xgb_subsample_input.value = 0.9
         meta_xgb_colsample_input.value = 0.9
+        meta_xgb_early_stopping_rounds_input.value = 30
         scan_universe_select.value = GROUP_OPTIONS[0]
         scan_kind_select.value = COINTEGRATION_KIND_OPTIONS[0]
         scan_unit_root_select.value = UnitRootTest.ADF.value
@@ -3634,6 +4553,7 @@ if (!targets.length) {
     symbol_1_select.on_change("value", on_symbol_1_change)
     symbol_2_select.on_change("value", on_symbol_2_change)
     leg_2_filter_select.on_change("value", on_leg2_filter_change)
+    co_mover_group_select.on_change("value", on_co_mover_group_change)
     leg_2_cointegration_kind_select.on_change("value", on_leg2_cointegration_kind_change)
     timeframe_select.on_change("value", on_timeframe_change)
     scan_universe_select.on_change("value", on_scan_universe_change)
@@ -3645,8 +4565,51 @@ if (!targets.length) {
     optimization_mode_select.on_change("value", on_optimization_mode_change)
     optimization_range_mode_select.on_change("value", on_optimization_range_mode_change)
     opt_stop_mode_select.on_change("value", on_opt_stop_mode_change)
+    optimization_period_slider.on_change("value", on_optimization_config_change)
+    optimization_objective_select.on_change("value", on_optimization_config_change)
+    auto_grid_trials_input.on_change("value", on_optimization_config_change)
+    opt_lookback_start.on_change("value", on_optimization_config_change)
+    opt_lookback_stop.on_change("value", on_optimization_config_change)
+    opt_lookback_step.on_change("value", on_optimization_config_change)
+    opt_entry_start.on_change("value", on_optimization_config_change)
+    opt_entry_stop.on_change("value", on_optimization_config_change)
+    opt_entry_step.on_change("value", on_optimization_config_change)
+    opt_exit_start.on_change("value", on_optimization_config_change)
+    opt_exit_stop.on_change("value", on_optimization_config_change)
+    opt_exit_step.on_change("value", on_optimization_config_change)
+    opt_stop_start.on_change("value", on_optimization_config_change)
+    opt_stop_stop.on_change("value", on_optimization_config_change)
+    opt_stop_step.on_change("value", on_optimization_config_change)
+    genetic_population_input.on_change("value", on_optimization_config_change)
+    genetic_generations_input.on_change("value", on_optimization_config_change)
+    genetic_elite_input.on_change("value", on_optimization_config_change)
+    genetic_mutation_input.on_change("value", on_optimization_config_change)
+    genetic_seed_input.on_change("value", on_optimization_config_change)
     meta_model_select.on_change("value", lambda _attr, _old, _new: sync_meta_model_ui())
+    meta_model_select.on_change("value", on_meta_config_change)
+    meta_objective_select.on_change("value", on_meta_config_change)
+    meta_oos_start_picker.on_change("value", on_meta_config_change)
+    meta_tree_max_depth_input.on_change("value", on_meta_config_change)
+    meta_tree_min_samples_leaf_input.on_change("value", on_meta_config_change)
+    meta_rf_estimators_input.on_change("value", on_meta_config_change)
+    meta_rf_max_depth_input.on_change("value", on_meta_config_change)
+    meta_rf_min_samples_leaf_input.on_change("value", on_meta_config_change)
+    meta_rf_max_features_select.on_change("value", on_meta_config_change)
+    meta_xgb_estimators_input.on_change("value", on_meta_config_change)
+    meta_xgb_max_depth_input.on_change("value", on_meta_config_change)
+    meta_xgb_learning_rate_input.on_change("value", on_meta_config_change)
+    meta_xgb_subsample_input.on_change("value", on_meta_config_change)
+    meta_xgb_colsample_input.on_change("value", on_meta_config_change)
+    meta_xgb_early_stopping_rounds_input.on_change("value", on_meta_config_change)
+    def sync_meta_objective_with_wfa(_attr: str, old: object, new: object) -> None:
+        current_meta_objective = str(meta_objective_select.value or "")
+        previous_wfa_objective = str(old or "")
+        next_wfa_objective = str(new or "score_log_trades")
+        if current_meta_objective in ("", previous_wfa_objective):
+            meta_objective_select.value = next_wfa_objective
     wfa_period_slider.on_change("value", on_wfa_config_change)
+    wfa_objective_select.on_change("value", sync_meta_objective_with_wfa)
+    wfa_objective_select.on_change("value", on_wfa_config_change)
     wfa_unit_select.on_change("value", on_wfa_config_change)
     wfa_lookback_input.on_change("value", on_wfa_config_change)
     wfa_test_input.on_change("value", on_wfa_config_change)
@@ -3690,6 +4653,7 @@ if (!targets.length) {
         zscore_toggle,
         equity_toggle,
         trades_toggle,
+        zscore_metrics_toggle,
         optimization_toggle,
         display_toggle,
         wfa_toggle,
@@ -3707,6 +4671,7 @@ if (!targets.length) {
         zscore_section,
         equity_section,
         trades_block,
+        zscore_metrics_block,
         optimization_block,
         display_block,
         wfa_block,
@@ -3744,6 +4709,7 @@ if (!targets.length) {
     append_service_log("wfa", wfa_status_div.text)
     append_service_log("meta_selector", meta_status_div.text)
     restore_saved_wfa_result(show_message=False)
+    restore_saved_meta_result(show_message=False)
     ensure_nonempty_layout()
     apply_plot_display_settings()
     rebalance_layout()

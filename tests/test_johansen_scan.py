@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 
 from domain.contracts import PairSelection, UnitRootGate, UnitRootTest
@@ -50,3 +51,18 @@ def test_johansen_scan_detects_cointegrated_pair() -> None:
     assert result.rank >= 1
     assert result.hedge_ratio is not None
     assert result.last_zscore is not None
+
+
+def test_johansen_scan_rejects_unsupported_det_order() -> None:
+    base = _random_walk(11) + 500.0
+    rng = np.random.default_rng(21)
+    pair_leg = base + rng.normal(loc=0.0, scale=0.5, size=base.size)
+
+    with pytest.raises(ValueError, match=r"supports only -1, 0, 1"):
+        scan_pair_johansen_arrays(
+            pair=PairSelection(symbol_1='X', symbol_2='Y'),
+            leg_1_values=base,
+            leg_2_values=pair_leg,
+            unit_root_gate=UnitRootGate(test=UnitRootTest.ADF),
+            params=JohansenScanParameters(k_ar_diff=1, det_order=2, significance_level=0.05),
+        )

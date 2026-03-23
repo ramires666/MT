@@ -137,7 +137,7 @@ def params_from_candidate(search_space: DistanceGridSearchSpace, candidate: Cand
         entry_z=float(search_space.entry_z[candidate[1]]),
         exit_z=float(search_space.exit_z[candidate[2]]),
         stop_z=None if raw_stop is None else float(raw_stop),
-        bollinger_k=float(search_space.bollinger_k[candidate[4]]),
+        bollinger_k=float(search_space.bollinger_k),
     )
     if params.exit_z >= params.entry_z or (params.stop_z is not None and params.stop_z <= params.entry_z):
         return None

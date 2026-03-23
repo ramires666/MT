@@ -41,7 +41,7 @@ def test_distance_grid_optimization_can_be_cancelled_before_evaluation(monkeypat
             entry_z=(1.0,),
             exit_z=(0.5,),
             stop_z=(2.0,),
-            bollinger_k=(2.0,),
+            bollinger_k=2.0,
         ),
         objective_metric="net_profit",
         point_1=1.0,

@@ -120,7 +120,7 @@ Derived layout:
 ### Left Sidebar
 Contains:
 - Data: refresh instruments, download or update history, broker and group filters
-- Pair Selection: group filter, search, only cointegrated pairs, symbol 1, symbol 2
+- Pair Selection: group filter, search, optional leg-2 filters (`all_symbols`, `co_movers`, `cointegrated_only`), symbol 1, symbol 2
 - Tester: timeframe, test period, algorithm selector, algorithm-specific parameters
 - Capital and Costs: capital, leverage, margin budget per leg, slippage, commission mode or overrides
 - Run Controls: run test, stop job, save preset
@@ -144,12 +144,21 @@ Behavior:
 - each chart recomputes its own visible y_range from the current x_range
 - if a chart is hidden, remaining charts expand vertically
 - tables and config panes are collapsible and sortable where applicable
+- every visible results table exposes a one-click `Save XLSX` action
+- exported `xlsx` files are written to `docs/tables` under a smart name built from block name, current pair, timeframe, and UTC timestamp
+- each exported workbook stores reproduction metadata rows above the raw table so the run can be reconstructed later
 
 ### Interaction Rules
 - clicking a trade row highlights entry and exit markers on both leg charts
 - clicking an optimization row copies parameters to the tester sidebar and launches a normal test
 - clicking a cointegration row copies the selected pair into the tester and optimizer selectors
+- clicking a `Selected OOS Folds` row copies that fold's parameters to the tester sidebar and launches a normal test on the current tester period
+- clicking a `Meta Robustness Grid` row copies the ranked parameter set to the tester sidebar and launches a normal test on the current tester period
+- when `Leg 2 Filter = co_movers`, `Symbol 2` is restricted to manually curated co-move groups for `Symbol 1`, optionally narrowed by a specific `Co-Mover Group`
 - tester period remains unchanged when a row from optimization is applied
+- optimization period remains unchanged when a row from optimization is applied
+- replay from an optimization row always runs charts on the current tester period, never on the optimizer period
+- replay from a Meta Selector row always runs charts on the current tester period and never rewrites `Selected OOS Folds`
 
 ## Strategies
 Implementation order:
@@ -211,9 +220,18 @@ Modes:
 Rules:
 - optimizer period is independent from tester period
 - selecting a trial copies parameters but not optimizer dates into the tester
+- selecting a trial replays the charts on the current tester period
 - every optimization column is sortable
 - rows can be selected to replay a normal test
 - result metadata includes seed, runtime, trial index, and parameter payload
+
+## Meta Selector UX Contract
+
+Rules:
+- `Selected OOS Folds` is the final per-window schedule; clicking one row replays that fold on the current tester period.
+- `Meta Robustness Grid` is a global ranking of parameter sets; clicking one row replays that ranked parameter set on the current tester period.
+- Clicking `Meta Robustness Grid` must not be interpreted as "rebuild `Selected OOS Folds` by this row".
+- Meta Selector row replay copies strategy parameters only; it does not mutate tester dates or optimizer dates.
 
 Objective metrics:
 - net profit

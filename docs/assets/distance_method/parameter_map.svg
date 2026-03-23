@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="520" viewBox="0 0 1100 520">
+  <rect width="1100" height="520" fill="#f8fafc"/>
+  <text x="60" y="56" font-size="30" font-family="Segoe UI, Arial, sans-serif" fill="#0f172a" font-weight="700">What Each Parameter Really Does</text>
+  <text x="60" y="86" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#475569">Signal parameters, execution parameters, and one parameter that is currently only decorative.</text>
+
+  <rect x="60" y="120" rx="20" ry="20" width="300" height="340" fill="#dcfce7" stroke="#22c55e" stroke-width="2"/>
+  <text x="210" y="160" text-anchor="middle" font-size="24" font-family="Segoe UI, Arial, sans-serif" fill="#14532d" font-weight="700">Affects Signal</text>
+  <text x="95" y="210" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#14532d">• lookback_bars</text>
+  <text x="95" y="245" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#14532d">• entry_z</text>
+  <text x="95" y="280" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#14532d">• exit_z</text>
+  <text x="95" y="320" font-size="15" font-family="Segoe UI, Arial, sans-serif" fill="#166534">When exit_z is negative, exit waits for</text>
+  <text x="95" y="342" font-size="15" font-family="Segoe UI, Arial, sans-serif" fill="#166534">the opposite z-score signal.</text>
+
+  <rect x="400" y="120" rx="20" ry="20" width="300" height="340" fill="#dbeafe" stroke="#60a5fa" stroke-width="2"/>
+  <text x="550" y="160" text-anchor="middle" font-size="24" font-family="Segoe UI, Arial, sans-serif" fill="#1e3a8a" font-weight="700">Affects Execution</text>
+  <text x="435" y="210" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#1e3a8a">• stop_z</text>
+  <text x="435" y="245" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#1e3a8a">• margin_budget_per_leg</text>
+  <text x="435" y="280" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#1e3a8a">• leverage</text>
+  <text x="435" y="315" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#1e3a8a">• slippage_points</text>
+  <text x="435" y="350" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#1e3a8a">• spread_1 / spread_2</text>
+  <text x="435" y="385" font-size="18" font-family="Segoe UI, Arial, sans-serif" fill="#1e3a8a">• commission profile</text>
+
+  <rect x="740" y="120" rx="20" ry="20" width="300" height="340" fill="#fae8ff" stroke="#d946ef" stroke-width="2"/>
+  <text x="890" y="160" text-anchor="middle" font-size="24" font-family="Segoe UI, Arial, sans-serif" fill="#86198f" font-weight="700">Visual Only Right Now</text>
+  <text x="775" y="220" font-size="20" font-family="Segoe UI, Arial, sans-serif" fill="#86198f">• bollinger_k</text>
+  <text x="775" y="265" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#86198f">Changes only:</text>
+  <text x="775" y="295" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#86198f">• zscore_upper</text>
+  <text x="775" y="325" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#86198f">• zscore_lower</text>
+  <text x="775" y="370" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#86198f">Does not change entries, exits,</text>
+  <text x="775" y="392" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#86198f">or stop logic in the current engine.</text>
+</svg>

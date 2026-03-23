@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="320" viewBox="0 0 1100 320">
+  <rect width="1100" height="320" fill="#fffdf8"/>
+  <text x="60" y="54" font-size="30" font-family="Segoe UI, Arial, sans-serif" fill="#0f172a" font-weight="700">Execution Timeline</text>
+  <text x="60" y="84" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#475569">Signal comes from the previous closed bar. Entry and exit fills happen on the next bar open.</text>
+
+  <line x1="90" y1="180" x2="1010" y2="180" stroke="#94a3b8" stroke-width="4"/>
+
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <line x1="170" y1="150" x2="170" y2="210" stroke="#64748b" stroke-width="3"/>
+    <line x1="380" y1="150" x2="380" y2="210" stroke="#64748b" stroke-width="3"/>
+    <line x1="590" y1="150" x2="590" y2="210" stroke="#64748b" stroke-width="3"/>
+    <line x1="800" y1="150" x2="800" y2="210" stroke="#64748b" stroke-width="3"/>
+
+    <text x="170" y="235" text-anchor="middle" font-size="16" fill="#334155">bar t-1 close</text>
+    <text x="380" y="235" text-anchor="middle" font-size="16" fill="#334155">bar t open</text>
+    <text x="590" y="235" text-anchor="middle" font-size="16" fill="#334155">bar t close</text>
+    <text x="800" y="235" text-anchor="middle" font-size="16" fill="#334155">bar t+1 open</text>
+
+    <rect x="115" y="102" width="110" height="34" rx="12" fill="#fed7aa"/>
+    <text x="170" y="124" text-anchor="middle" font-size="15" fill="#9a3412" font-weight="700">compute zscore</text>
+
+    <rect x="315" y="102" width="130" height="34" rx="12" fill="#bfdbfe"/>
+    <text x="380" y="124" text-anchor="middle" font-size="15" fill="#1d4ed8" font-weight="700">entry fill at open</text>
+
+    <rect x="535" y="102" width="110" height="34" rx="12" fill="#ddd6fe"/>
+    <text x="590" y="124" text-anchor="middle" font-size="15" fill="#6d28d9" font-weight="700">new signal known</text>
+
+    <rect x="730" y="102" width="140" height="34" rx="12" fill="#fecaca"/>
+    <text x="800" y="124" text-anchor="middle" font-size="15" fill="#b91c1c" font-weight="700">exit fill at next open</text>
+
+    <text x="130" y="286" font-size="15" fill="#334155">This is why gaps between close and next open matter.</text>
+    <text x="130" y="306" font-size="15" fill="#334155">The strategy is previous-bar signal, next-open execution.</text>
+  </g>
+</svg>

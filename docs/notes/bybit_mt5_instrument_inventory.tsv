@@ -1,0 +1,367 @@
+symbol	meaning	description	human_family	human_family_title	catalog_group	path
+GAS-C	Gasoline	Gasoline	energy	Energy	crypto	Commodities\GAS-C
+GASOIL-C	Low Sulphur Gasoil - Cash	Low Sulphur Gasoil - Cash	energy	Energy	commodities	Commodities\GASOIL-C
+NG-C	Natural Gas	Natural Gas	energy	Energy	commodities	Commodities\NG-C
+UKOUSD	Brent Crude Oil Cash	Brent Crude Oil Cash	energy	Energy	commodities	Oil\UKOUSD
+USOUSD	WTI Crude Oil Cash	WTI Crude Oil Cash	energy	Energy	commodities	Oil\USOUSD
+AUDCAD+	Australian Dollar vs Canadian Dollar	Australian Dollar vs Canadian Dollar	forex	FX	forex	Forex+\Forex Major\AUDCAD+
+AUDCHF+	Australian Dollar vs Swiss Franc	Australian Dollar vs Swiss Franc	forex	FX	forex	Forex+\Forex Major\AUDCHF+
+AUDCNH+	AU Dollar vs Chinese Yuan	AU Dollar vs Chinese Yuan	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\AUDCNH+
+AUDJPY+	Australian Dollar vs Japanese Yen	Australian Dollar vs Japanese Yen	forex	FX	indices	Forex+\Forex Major\AUDJPY+
+AUDNZD+	Australian Dollar vs New Zealand Dollar	Australian Dollar vs New Zealand Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\AUDNZD+
+AUDSGD+	Australian Dollar vs Singapore Dollar	Australian Dollar vs Singapore Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\AUDSGD+
+AUDUSD	Australian Dollar vs US Dollar	Australian Dollar vs US Dollar	forex	FX	forex	Forex Major\Forex Major\AUDUSD
+AUDUSD+	Australian Dollar vs US Dollar	Australian Dollar vs US Dollar	forex	FX	forex	Forex+\Forex Major\AUDUSD+
+CADCHF+	Canadian Dollar vs Swiss Franc	Canadian Dollar vs Swiss Franc	forex	FX	forex	Forex+\Forex Major\CADCHF+
+CADJPY+	Canadian Dollar vs Japanese Yen	Canadian Dollar vs Japanese Yen	forex	FX	indices	Forex+\Forex Major\CADJPY+
+CHFJPY+	Swiss Franc vs Japanese Yen	Swiss Franc vs Japanese Yen	forex	FX	forex	Forex+\Forex Major\CHFJPY+
+CHFSGD+	Swiss Franc vs Singapore Dollar	Swiss Franc vs Singapore Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\CHFSGD+
+EURAUD+	Euro vs Australian Dollar	Euro vs Australian Dollar	forex	FX	forex	Forex+\Forex Major\EURAUD+
+EURCAD+	Euro vs Canadian Dollar	Euro vs Canadian Dollar	forex	FX	forex	Forex+\Forex Major\EURCAD+
+EURCHF+	Euro vs Swiss Franc	Euro vs Swiss Franc	forex	FX	forex	Forex+\Forex Major\EURCHF+
+EURCZK+	Euro vs Czech Koruna	Euro vs Czech Koruna	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\EURCZK+
+EURDKK+	Euro vs Danish Krone	Euro vs Danish Krone	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\EURDKK+
+EURGBP+	Euro vs Great Britain Pound	Euro vs Great Britain Pound	forex	FX	forex	Forex+\Forex Major\EURGBP+
+EURHUF+	Euro vs Hungarian Forint	Euro vs Hungarian Forint	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\EURHUF+
+EURJPY+	Euro vs Japanese Yen	Euro vs Japanese Yen	forex	FX	forex	Forex+\Forex Major\EURJPY+
+EURNOK+	Euro vs Norwegian Krone	Euro vs Norwegian Krone	forex	FX	forex	Forex+\Forex Exotic\EURNOK+
+EURNZD+	Euro vs New Zealand Dollar	Euro vs New Zealand Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\EURNZD+
+EURPLN+	Euro vs Polish Zloty	Euro vs Polish Zloty	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\EURPLN+
+EURSEK+	Euro vs Swedish Krona	Euro vs Swedish Krona	forex	FX	forex	Forex+\Forex Exotic\EURSEK+
+EURSGD+	Euro vs Singapore Dollar	Euro vs Singapore Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\EURSGD+
+EURTRY+	Euro vs Turkish Lira	Euro vs Turkish Lira	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\EURTRY+
+EURUSD	Euro vs US Dollar	Euro vs US Dollar	forex	FX	forex	Forex Major\Forex Major\EURUSD
+EURUSD+	Euro vs US Dollar	Euro vs US Dollar	forex	FX	forex	Forex+\Forex Major\EURUSD+
+GBPAUD+	Great Britain Pound vs Australian Dollar	Great Britain Pound vs Australian Dollar	forex	FX	forex	Forex+\Forex Major\GBPAUD+
+GBPCAD+	Great Britain Pound vs Canadian Dollar	Great Britain Pound vs Canadian Dollar	forex	FX	forex	Forex+\Forex Major\GBPCAD+
+GBPCHF+	Great Britain Pound vs Swiss Franc	Great Britain Pound vs Swiss Franc	forex	FX	forex	Forex+\Forex Major\GBPCHF+
+GBPJPY+	Great Britain Pound vs Japanese Yen	Great Britain Pound vs Japanese Yen	forex	FX	forex	Forex+\Forex Major\GBPJPY+
+GBPNZD+	Great Britain Pound vs New Zealand Dollar	Great Britain Pound vs New Zealand Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\GBPNZD+
+GBPSGD+	Great Britain Pound vs Singapore Dollar	Great Britain Pound vs Singapore Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\GBPSGD+
+GBPUSD	Great Britain Pound vs US Dollar	Great Britain Pound vs US Dollar	forex	FX	forex	Forex Major\Forex Major\GBPUSD
+GBPUSD+	Great Britain Pound vs US Dollar	Great Britain Pound vs US Dollar	forex	FX	forex	Forex+\Forex Major\GBPUSD+
+NZDCAD+	New Zealand Dollar vs Canadian Dollar	New Zealand Dollar vs Canadian Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\NZDCAD+
+NZDCHF+	New Zealand Dollar vs Swiss Franc	New Zealand Dollar vs Swiss Franc	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\NZDCHF+
+NZDJPY+	New Zealand Dollar vs Japanese Yen	New Zealand Dollar vs Japanese Yen	forex	FX	indices	Forex+\Forex Minor\Forex Minor -Forex\NZDJPY+
+NZDSGD+	New Zealand Dollar vs Singapore Dollar	New Zealand Dollar vs Singapore Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\NZDSGD+
+NZDUSD	New Zealand Dollar vs US Dollar	New Zealand Dollar vs US Dollar	forex	FX	forex	Forex Major\Forex Minor\NZDUSD
+NZDUSD+	New Zealand Dollar vs US Dollar	New Zealand Dollar vs US Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\NZDUSD+
+SGDJPY+	Singapore Dollar vs Japanese Yen	Singapore Dollar vs Japanese Yen	forex	FX	indices	Forex+\Forex Minor\Forex Minor -Forex\SGDJPY+
+USDBRL	US Dollar vs Brazilian	US Dollar vs Brazilian	forex	FX	forex	Forex Major\Forex Exotic2\USDBRL
+USDBRL+	US Dollar vs Brazilian	US Dollar vs Brazilian	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDBRL+
+USDCAD	US Dollar vs Canadian Dollar	US Dollar vs Canadian Dollar	forex	FX	forex	Forex Major\Forex Major\USDCAD
+USDCAD+	US Dollar vs Canadian Dollar	US Dollar vs Canadian Dollar	forex	FX	forex	Forex+\Forex Major\USDCAD+
+USDCHF	US Dollar vs Swiss Franc	US Dollar vs Swiss Franc	forex	FX	forex	Forex Major\Forex Major\USDCHF
+USDCHF+	US Dollar vs Swiss Franc	US Dollar vs Swiss Franc	forex	FX	forex	Forex+\Forex Major\USDCHF+
+USDCLP	US Dollar vs Chile Peso	US Dollar vs Chile Peso	forex	FX	forex	Forex Major\Forex Major\USDCLP
+USDCLP+	US Dollar vs Chile Peso	US Dollar vs Chile Peso	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDCLP+
+USDCNH+	US Dollar vs Chinese Yuan	US Dollar vs Chinese Yuan	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\USDCNH+
+USDCOP	US Dollar vs Colombia Peso	US Dollar vs Colombia Peso	forex	FX	forex	Forex Major\Forex Major\USDCOP
+USDCOP+	US Dollar vs Colombia Peso	US Dollar vs Colombia Peso	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDCOP+
+USDCZK	US Dollar vs Czech Koruna	US Dollar vs Czech Koruna	forex	FX	forex	Forex Major\Forex Exotic2\USDCZK
+USDCZK+	US Dollar vs Czech Koruna	US Dollar vs Czech Koruna	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDCZK+
+USDDKK+	US Dollar vs Danish Krone	US Dollar vs Danish Krone	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDDKK+
+USDHKD	US Dollar vs Hong Kong Dollar	US Dollar vs Hong Kong Dollar	forex	FX	forex	Forex Major\Forex Minor\USDHKD
+USDHUF+	US Dollar vs Hungarian Forint	US Dollar vs Hungarian Forint	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDHUF+
+USDIDR	US Dollar vs Indonesian Rupiah	US Dollar vs Indonesian Rupiah	forex	FX	forex	Forex Major\Forex Major\USDIDR
+USDIDR+	US Dollar vs Indonesian Rupiah	US Dollar vs Indonesian Rupiah	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDIDR+
+USDILS	US dollar vs Israeli Shekel	US dollar vs Israeli Shekel	forex	FX	forex	Forex Major\Forex Major\USDILS
+USDILS+	US dollar vs Israeli Shekel	US dollar vs Israeli Shekel	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDILS+
+USDINR	US Dollar vs Indian Rupee	US Dollar vs Indian Rupee	forex	FX	forex	Forex Major\Forex Exotic2\USDINR
+USDINR+	US Dollar vs Indian Rupee	US Dollar vs Indian Rupee	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDINR+
+USDJPY	US Dollar vs Japanese Yen	US Dollar vs Japanese Yen	forex	FX	indices	Forex Major\Forex Major\USDJPY
+USDJPY+	US Dollar vs Japanese Yen	US Dollar vs Japanese Yen	forex	FX	indices	Forex+\Forex Major\USDJPY+
+USDKRW	US Dollar vs South Korean won	US Dollar vs South Korean won	forex	FX	forex	Forex Major\Forex Major\USDKRW
+USDKRW+	US Dollar vs South Korean won	US Dollar vs South Korean won	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDKRW+
+USDMXN+	US Dollar vs Mexican Peso	US Dollar vs Mexican Peso	forex	FX	forex	Forex+\Forex Exotic\USDMXN+
+USDNOK+	US Dollar vs Norwegian Krone	US Dollar vs Norwegian Krone	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\USDNOK+
+USDPLN	US Dollar vs Polish Zloty	US Dollar vs Polish Zloty	forex	FX	forex	Forex Major\Forex Exotic2\USDPLN
+USDPLN+	US Dollar vs Polish Zloty	US Dollar vs Polish Zloty	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\USDPLN+
+USDSEK+	US Dollar vs Swedish Krona	US Dollar vs Swedish Krona	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\USDSEK+
+USDSGD	US Dollar vs Singapore Dollar	US Dollar vs Singapore Dollar	forex	FX	forex	Forex Major\Forex Minor\USDSGD
+USDSGD+	US Dollar vs Singapore Dollar	US Dollar vs Singapore Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -Forex\USDSGD+
+USDTHB	United States Dollar vs Thai Baht	United States Dollar vs Thai Baht	forex	FX	forex	Forex Major\Forex Major\USDTHB
+USDTHB+	United States Dollar vs Thai Baht	United States Dollar vs Thai Baht	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDTHB+
+USDTRY+	US Dollar vs Turkish Lira	US Dollar vs Turkish Lira	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDTRY+
+USDTWD	US Dollar vs Taiwan Dollar	US Dollar vs Taiwan Dollar	forex	FX	forex	Forex Major\Forex Major\USDTWD
+USDTWD+	US Dollar vs Taiwan Dollar	US Dollar vs Taiwan Dollar	forex	FX	forex	Forex+\Forex Minor\Forex Minor -CFD\USDTWD+
+USDZAR	US Dollar vs South African Rand	US Dollar vs South African Rand	forex	FX	forex	Forex Major\Forex Exotic\USDZAR
+USDZAR+	US Dollar vs South African Rand	US Dollar vs South African Rand	forex	FX	forex	Forex+\Forex Exotic\USDZAR+
+USTUSD	""	""	forex	FX	forex	Forex Major\Forex Minor\USTUSD
+BVSPX	Bovespa Cash CFD (BRL)	Bovespa Cash CFD (BRL)	indices	Indices	indices	CFDs\Indices Minor\BVSPX
+CHINA50	China A50 Index Cash CFD (USD)	China A50 Index Cash CFD (USD)	indices	Indices	indices	CFDs\Indices Minor\CHINA50
+CHINAH	Hong Kong China H-shares Cash	Hong Kong China H-shares Cash	indices	Indices	indices	CFDs\Indices Minor\CHINAH
+DJ30	Dow Jones Index Cash CFD (USD)	Dow Jones Index Cash CFD (USD)	indices	Indices	indices	CFDs\Indices Major\DJ30
+ES35	ES35 Index Cash	ES35 Index Cash	indices	Indices	indices	CFDs\Indices Minor\ES35
+EU50	EUSTX50 Cash	EUSTX50 Cash	indices	Indices	indices	CFDs\Indices Major\EU50
+FRA40	France 40 Index	France 40 Index	indices	Indices	indices	CFDs\Indices Major\FRA40
+GER40	GER40 Cash	GER40 Cash	indices	Indices	indices	CFDs\Indices Major\GER40
+HK50	Hang Seng Index Cash CFD (HKD)	Hang Seng Index Cash CFD (HKD)	indices	Indices	indices	CFDs\Indices Minor\HK50
+HKTECH	Hang Seng TECH Index CASH CFD (HKD)	Hang Seng TECH Index CASH CFD (HKD)	indices	Indices	indices	CFDs\Indices Minor\HKTECH
+NAS100	NAS100 Cash	NAS100 Cash	indices	Indices	indices	CFDs\Indices Major\NAS100
+NETH25	Netherlands 25 Cash	Netherlands 25 Cash	indices	Indices	crypto	CFDs\Indices Minor\NETH25
+Nikkei225	Nikkei Index Cash CFD (JPY)	Nikkei Index Cash CFD (JPY)	indices	Indices	indices	Nikkei\Nikkei225
+SA40	South Africa 40 - CASH	South Africa 40 - CASH	indices	Indices	indices	CFDs\Indices Minor\SA40
+SGP20	Singapore 20 Index Cash CFD	Singapore 20 Index Cash CFD	indices	Indices	indices	CFDs\Indices Minor\SGP20
+SP500	S&P Index Cash CFD (USD)	S&P Index Cash CFD (USD)	indices	Indices	indices	CFDs\Indices Major\SP500
+SPI200	S&P/ASX 200 Index Cash CFD (AUD)	S&P/ASX 200 Index Cash CFD (AUD)	indices	Indices	indices	CFDs\Indices Major\SPI200
+SWI20	Switzerland 20 Cash	Switzerland 20 Cash	indices	Indices	indices	CFDs\Indices Minor\SWI20
+TWINDEX	Taiwan RIC Index Cash CFD	Taiwan RIC Index Cash CFD	indices	Indices	indices	CFDs\Indices Minor\TWINDEX
+UK100	UK 100 Cash	UK 100 Cash	indices	Indices	indices	CFDs\Indices Major\UK100
+US2000	US SMALL CAP 2000 - CASH	US SMALL CAP 2000 - CASH	indices	Indices	indices	CFDs\Indices Minor\US2000
+COPPER-C	Copper	Copper	metals	Metals	custom	Commodities\COPPER-C
+XAGAUD	Silver vs Australian Dollar	Silver vs Australian Dollar	metals	Metals	commodities	Silver\XAGAUD
+XAGUSD	Silver US Dollar	Silver US Dollar	metals	Metals	commodities	Silver\XAGUSD
+XAUAUD+	Gold vs Australian Dollar	Gold vs Australian Dollar	metals	Metals	commodities	Gold+\XAUAUD+
+XAUEUR+	Gold / Euro	Gold / Euro	metals	Metals	commodities	Gold+\XAUEUR+
+XAUJPY+	Gold vs Japanese Yen	Gold vs Japanese Yen	metals	Metals	commodities	Gold+\XAUJPY+
+XAUUSD+	Gold US Dollar	Gold US Dollar	metals	Metals	commodities	Gold+\XAUUSD+
+XPDUSD	Palladium - Cash	Palladium - Cash	metals	Metals	indices	Commodities\XPDUSD
+XPTUSD	Platinum vs US Dollar	Platinum vs US Dollar	metals	Metals	forex	Commodities\XPTUSD
+OJ-C	Orange Juice - Cash	Orange Juice - Cash	commodities_other	Other Commodities	indices	Commodities\OJ-C
+Soybean-C	Soybean - Cash	Soybean - Cash	commodities_other	Other Commodities	indices	Commodities\Soybean-C
+Cocoa-C	US Cocoa - Cash	US Cocoa - Cash	softs_agri	Softs / Agriculture	indices	Commodities\Cocoa-C
+Coffee-C	Coffee Arabica - Cash	Coffee Arabica - Cash	softs_agri	Softs / Agriculture	indices	Commodities\Coffee-C
+Cotton-C	Cotton - Cash	Cotton - Cash	softs_agri	Softs / Agriculture	indices	Commodities\Cotton-C
+Sugar-C	Sugar Raw - Cash	Sugar Raw - Cash	softs_agri	Softs / Agriculture	indices	Commodities\Sugar-C
+Wheat-C	US Wheat (SRW) - Cash	US Wheat (SRW) - Cash	softs_agri	Softs / Agriculture	indices	Commodities\Wheat-C
+AALG	AMERICAN AIRLINES GROUP INC	AMERICAN AIRLINES GROUP INC	stocks	US Stocks	stocks	Stocks\US\AALG
+AAPL	Apple Inc.	Apple Inc.	stocks	US Stocks	stocks	Stocks\US\AAPL
+ABBVIE	ABBVIE INC	ABBVIE INC	stocks	US Stocks	stocks	Stocks\US\ABBVIE
+ABNB	Airbnb Inc	Airbnb Inc	stocks	US Stocks	stocks	Stocks\US\ABNB
+ACN	Accenture PLC - Class A	Accenture PLC - Class A	stocks	US Stocks	stocks	Stocks\US\ACN
+ADBE	Adobe Inc	Adobe Inc	stocks	US Stocks	stocks	Stocks\US\ADBE
+AFG	American Financial Group Inc	American Financial Group Inc	stocks	US Stocks	stocks	Stocks\US\AFG
+ALIBABA	ALIBABA GROUP HOLDING-SP ADR	ALIBABA GROUP HOLDING-SP ADR	stocks	US Stocks	stocks	Stocks\US\ALIBABA
+AMAT	Applied Materials Inc	Applied Materials Inc	stocks	US Stocks	stocks	Stocks\US\AMAT
+AMAZON	AMAZON.COM INC	AMAZON.COM INC	stocks	US Stocks	stocks	Stocks\US\AMAZON
+AMD	Advanced Micro Devices / AMD	Advanced Micro Devices / AMD	stocks	US Stocks	stocks	Stocks\US\AMD
+AMGN	Amgen Inc	Amgen Inc	stocks	US Stocks	stocks	Stocks\US\AMGN
+APP	AppLovin Corp - Class A	AppLovin Corp - Class A	stocks	US Stocks	stocks	Stocks\US\APP
+ASML-US	ASML Holding NV	ASML Holding NV	stocks	US Stocks	stocks	Stocks\US\ASML-US
+AT&T	AT&T INC	AT&T INC	stocks	US Stocks	stocks	Stocks\US\AT&T
+AVGO	Broadcom Inc	Broadcom Inc	stocks	US Stocks	stocks	Stocks\US\AVGO
+AXP	American Express Co	American Express Co	stocks	US Stocks	stocks	Stocks\US\AXP
+BAC	BANK OF AMERICA CORP	BANK OF AMERICA CORP	stocks	US Stocks	stocks	Stocks\US\BAC
+BAIDU	BAIDU INC - SPON ADR	BAIDU INC - SPON ADR	stocks	US Stocks	stocks	Stocks\US\BAIDU
+BBD	Banco Bradesco	Banco Bradesco	stocks	US Stocks	stocks	Stocks\US\BBD
+BBWI	Bath & Body Works Inc	Bath & Body Works Inc	stocks	US Stocks	stocks	Stocks\US\BBWI
+BE	Bloom Energy Corp	Bloom Energy Corp	stocks	US Stocks	stocks	Stocks\US\BE
+BEN	Franklin Resources Inc	Franklin Resources Inc	stocks	US Stocks	stocks	Stocks\US\BEN
+BITF	Bitfarms Ltd	Bitfarms Ltd	stocks	US Stocks	stocks	Stocks\US\BITF
+BKNG	Booking Holdings Inc	Booking Holdings Inc	stocks	US Stocks	stocks	Stocks\US\BKNG
+BLK	Blackrock Inc	Blackrock Inc	stocks	US Stocks	stocks	Stocks\US\BLK
+BLSH	Bullish Inc.	Bullish Inc.	stocks	US Stocks	stocks	Stocks\US\BLSH
+BMBL	Bumble Inc	Bumble Inc	stocks	US Stocks	stocks	Stocks\US\BMBL
+BMNR	BitMine Immersion Technologies Inc	BitMine Immersion Technologies Inc	stocks	US Stocks	stocks	Stocks\US\BMNR
+BNTX	BIONTECH SE-ADR	BIONTECH SE-ADR	stocks	US Stocks	stocks	Stocks\US\BNTX
+BOEING	BOEING CO/THE	BOEING CO/THE	stocks	US Stocks	stocks	Stocks\US\BOEING
+BRKB	Berkshire Hathaway Inc - Class B	Berkshire Hathaway Inc - Class B	stocks	US Stocks	stocks	Stocks\US\BRKB
+BUD	ANHEUSER-BUSCH INBEV SPN ADR	ANHEUSER-BUSCH INBEV SPN ADR	stocks	US Stocks	stocks	Stocks\US\BUD
+BYND	Beyond Meat	Beyond Meat	stocks	US Stocks	stocks	Stocks\US\BYND
+CAH	Cardinal Health Inc	Cardinal Health Inc	stocks	US Stocks	stocks	Stocks\US\CAH
+CAT	Caterpillar Inc	Caterpillar Inc	stocks	US Stocks	stocks	Stocks\US\CAT
+CDNS	Cadence Design Systems Inc	Cadence Design Systems Inc	stocks	US Stocks	stocks	Stocks\US\CDNS
+CIM	Chimera Investment Corp	Chimera Investment Corp	stocks	US Stocks	stocks	Stocks\US\CIM
+CISCO	CISCO SYSTEMS INC	CISCO SYSTEMS INC	stocks	US Stocks	stocks	Stocks\US\CISCO
+CITI	CITIGROUP INC	CITIGROUP INC	stocks	US Stocks	stocks	Stocks\US\CITI
+CL	Colgate-Palmolive Co	Colgate-Palmolive Co	stocks	US Stocks	stocks	Stocks\US\CL
+CLS	Celestica Inc	Celestica Inc	stocks	US Stocks	stocks	Stocks\US\CLS
+CLSK	CleanSpark Inc	CleanSpark Inc	stocks	US Stocks	stocks	Stocks\US\CLSK
+CMCSA	COMCAST CORP-CLASS A	COMCAST CORP-CLASS A	stocks	US Stocks	stocks	Stocks\US\CMCSA
+COHR	Coherent Corp	Coherent Corp	stocks	US Stocks	stocks	Stocks\US\COHR
+COIN	COINBASE GLOBAL INC -CLASS A	COINBASE GLOBAL INC -CLASS A	stocks	US Stocks	stocks	Stocks\US\COIN
+COR	Cencora Inc.	Cencora Inc.	stocks	US Stocks	stocks	Stocks\US\COR
+COST	Costco Wholesale Corp	Costco Wholesale Corp	stocks	US Stocks	stocks	Stocks\US\COST
+CRCL	Circle Internet Group Inc	Circle Internet Group Inc	stocks	US Stocks	stocks	Stocks\US\CRCL
+CRDO	Credo Technology Group Holding Ltd	Credo Technology Group Holding Ltd	stocks	US Stocks	stocks	Stocks\US\CRDO
+CRM	SALESFORCE.COM INC	SALESFORCE.COM INC	stocks	US Stocks	stocks	Stocks\US\CRM
+CRWD	Crowdstrike Holdings Inc	Crowdstrike Holdings Inc	stocks	US Stocks	stocks	Stocks\US\CRWD
+CTRA	Coterra Energy Inc	Coterra Energy Inc	stocks	US Stocks	stocks	Stocks\US\CTRA
+CVX	CHEVRON CORP	CHEVRON CORP	stocks	US Stocks	stocks	Stocks\US\CVX
+DAL	Delta Air Lines Inc	Delta Air Lines Inc	stocks	US Stocks	stocks	Stocks\US\DAL
+DAVE	Dave Inc	Dave Inc	stocks	US Stocks	stocks	Stocks\US\DAVE
+DDOG	Datadog Inc - Class A	Datadog Inc - Class A	stocks	US Stocks	stocks	Stocks\US\DDOG
+DELL	Dell Technologies Inc	Dell Technologies Inc	stocks	US Stocks	stocks	Stocks\US\DELL
+DISNEY	WALT DISNEY CO/THE	WALT DISNEY CO/THE	stocks	US Stocks	stocks	Stocks\US\DISNEY
+DLTR	Dollar Tree Inc	Dollar Tree Inc	stocks	US Stocks	stocks	Stocks\US\DLTR
+DOCU	DocuSign Inc	DocuSign Inc	stocks	US Stocks	stocks	Stocks\US\DOCU
+DXC	DXC Technology Corp	DXC Technology Corp	stocks	US Stocks	stocks	Stocks\US\DXC
+EQR	Equity Residential	Equity Residential	stocks	US Stocks	stocks	Stocks\US\EQR
+ESS	Essex Property Trust Inc	Essex Property Trust Inc	stocks	US Stocks	stocks	Stocks\US\ESS
+EXPE	Expedia Group Inc	Expedia Group Inc	stocks	US Stocks	stocks	Stocks\US\EXPE
+EXXON	EXXON MOBIL CORP	EXXON MOBIL CORP	stocks	US Stocks	stocks	Stocks\US\EXXON
+F	Ford Motor Co	Ford Motor Co	stocks	US Stocks	stocks	Stocks\US\F
+FCEL	FuelCell Energy Inc	FuelCell Energy Inc	stocks	US Stocks	stocks	Stocks\US\FCEL
+FDX	FedEx Corp	FedEx Corp	stocks	US Stocks	stocks	Stocks\US\FDX
+FIG	Figma Inc	Figma Inc	stocks	US Stocks	stocks	Stocks\US\FIG
+FITB	Fifth Third Bancorp	Fifth Third Bancorp	stocks	US Stocks	stocks	Stocks\US\FITB
+FOX	Fox Corp - Class B	Fox Corp - Class B	stocks	US Stocks	stocks	Stocks\US\FOX
+FSLR	First Solar Inc	First Solar Inc	stocks	US Stocks	crypto	Stocks\US\FSLR
+FTNT	Fortinet Inc	Fortinet Inc	stocks	US Stocks	stocks	Stocks\US\FTNT
+FUTU	Futu Holdings Ltd	Futu Holdings Ltd	stocks	US Stocks	stocks	Stocks\US\FUTU
+GILD	Gilead Sciences Inc	Gilead Sciences Inc	stocks	US Stocks	stocks	Stocks\US\GILD
+GLXY	Galaxy Digital Inc.	Galaxy Digital Inc.	stocks	US Stocks	stocks	Stocks\US\GLXY
+GM	General Motors Co	General Motors Co	stocks	US Stocks	stocks	Stocks\US\GM
+GNRC	Generac Holdings Inc	Generac Holdings Inc	stocks	US Stocks	stocks	Stocks\US\GNRC
+GOOG	ALPHABET INC-CL C	ALPHABET INC-CL C	stocks	US Stocks	stocks	Stocks\US\GOOG
+GRAB	Grab Holdings Ltd (ADRs)	Grab Holdings Ltd (ADRs)	stocks	US Stocks	stocks	Stocks\US\GRAB
+GS	Goldman Sachs Group Inc	Goldman Sachs Group Inc	stocks	US Stocks	commodities	Stocks\US\GS
+HD	HOME DEPOT INC	HOME DEPOT INC	stocks	US Stocks	stocks	Stocks\US\HD
+HON	HONEYWELL INTERNATIONAL INC	HONEYWELL INTERNATIONAL INC	stocks	US Stocks	stocks	Stocks\US\HON
+HOOD	ROBINHOOD MARKETS INC - A	ROBINHOOD MARKETS INC - A	stocks	US Stocks	stocks	Stocks\US\HOOD
+HPE	Hewlett Packard Enterprise Co / HPE	Hewlett Packard Enterprise Co / HPE	stocks	US Stocks	stocks	Stocks\US\HPE
+HSBCn	HSBC HOLDINGS PLC-SPONS ADR	HSBC HOLDINGS PLC-SPONS ADR	stocks	US Stocks	stocks	Stocks\US\HSBCn
+HTHT	Huazhu Group Ltd	Huazhu Group Ltd	stocks	US Stocks	stocks	Stocks\US\HTHT
+HUT	Hut 8 Mining Corp	Hut 8 Mining Corp	stocks	US Stocks	stocks	Stocks\US\HUT
+IBM	INTL BUSINESS MACHINES CORP	INTL BUSINESS MACHINES CORP	stocks	US Stocks	stocks	Stocks\US\IBM
+IBN	ICICI Bank Ltd (ADRs)	ICICI Bank Ltd (ADRs)	stocks	US Stocks	stocks	Stocks\US\IBN
+ICL	ICL Group Ltd (ADRs)	ICL Group Ltd (ADRs)	stocks	US Stocks	stocks	Stocks\US\ICL
+INSM	Insmed Incorporated	Insmed Incorporated	stocks	US Stocks	stocks	Stocks\US\INSM
+INTEL	INTEL CORP	INTEL CORP	stocks	US Stocks	stocks	Stocks\US\INTEL
+INTU	Intuit Inc	Intuit Inc	stocks	US Stocks	stocks	Stocks\US\INTU
+IP	International Paper Co	International Paper Co	stocks	US Stocks	stocks	Stocks\US\IP
+IR	Ingersoll Rand Inc	Ingersoll Rand Inc	stocks	US Stocks	crypto	Stocks\US\IR
+ISRG	Intuitive Surgical Inc	Intuitive Surgical Inc	stocks	US Stocks	stocks	Stocks\US\ISRG
+ITW	Illinois Tool Works / ITW	Illinois Tool Works / ITW	stocks	US Stocks	stocks	Stocks\US\ITW
+JBL	Jabil Inc	Jabil Inc	stocks	US Stocks	stocks	Stocks\US\JBL
+JD	JD.COM INC-ADR	JD.COM INC-ADR	stocks	US Stocks	stocks	Stocks\US\JD
+JNJ	JOHNSON & JOHNSON	JOHNSON & JOHNSON	stocks	US Stocks	stocks	Stocks\US\JNJ
+JPM	JPMORGAN CHASE & CO	JPMORGAN CHASE & CO	stocks	US Stocks	stocks	Stocks\US\JPM
+KO	COCA-COLA CO/THE	COCA-COLA CO/THE	stocks	US Stocks	stocks	Stocks\US\KO
+LAC	Lithium Americas Corp	Lithium Americas Corp	stocks	US Stocks	stocks	Stocks\US\LAC
+LAUR	Laureate Education Inc	Laureate Education Inc	stocks	US Stocks	stocks	Stocks\US\LAUR
+LBTYK	Liberty Global Ltd. Class C	Liberty Global Ltd. Class C	stocks	US Stocks	stocks	Stocks\US\LBTYK
+LI	LI AUTO INC - ADR	LI AUTO INC - ADR	stocks	US Stocks	stocks	Stocks\US\LI
+LITE	Lumentum Holdings Inc	Lumentum Holdings Inc	stocks	US Stocks	stocks	Stocks\US\LITE
+LLY	Eli Lilly & Co	Eli Lilly & Co	stocks	US Stocks	stocks	Stocks\US\LLY
+LMT	Lockheed Martin Corp	Lockheed Martin Corp	stocks	US Stocks	stocks	Stocks\US\LMT
+LPL	LG Display Co Ltd (ADRs)	LG Display Co Ltd (ADRs)	stocks	US Stocks	stocks	Stocks\US\LPL
+LRCX	Lam Research Corp	Lam Research Corp	stocks	US Stocks	stocks	Stocks\US\LRCX
+LULU	LULULEMON ATHLETICA INC	LULULEMON ATHLETICA INC	stocks	US Stocks	stocks	Stocks\US\LULU
+LYB	LyondellBasell Industries - Class A	LyondellBasell Industries - Class A	stocks	US Stocks	stocks	Stocks\US\LYB
+LYFT	Lyft Inc	Lyft Inc	stocks	US Stocks	stocks	Stocks\US\LYFT
+MA	MASTERCARD INC - A	MASTERCARD INC - A	stocks	US Stocks	stocks	Stocks\US\MA
+MARA	Marathon Digital Holdings, Inc	Marathon Digital Holdings, Inc	stocks	US Stocks	stocks	Stocks\US\MARA
+MAT	Mattel Inc	Mattel Inc	stocks	US Stocks	stocks	Stocks\US\MAT
+MCD	MCDONALD'S CORP	MCDONALD'S CORP	stocks	US Stocks	stocks	Stocks\US\MCD
+MCK	Mckesson Corp	Mckesson Corp	stocks	US Stocks	stocks	Stocks\US\MCK
+MELI	Mercado Libre	Mercado Libre	stocks	US Stocks	stocks	Stocks\US\MELI
+MET	Metlife Inc	Metlife Inc	stocks	US Stocks	stocks	Stocks\US\MET
+META	Meta Platforms Inc	Meta Platforms Inc	stocks	US Stocks	stocks	Stocks\US\META
+MFA	MFA Financial Inc	MFA Financial Inc	stocks	US Stocks	stocks	Stocks\US\MFA
+MMM	3M CO	3M CO	stocks	US Stocks	stocks	Stocks\US\MMM
+MOH	Molina Healthcare Inc	Molina Healthcare Inc	stocks	US Stocks	stocks	Stocks\US\MOH
+MPLX	MPLX LP	MPLX LP	stocks	US Stocks	stocks	Stocks\US\MPLX
+MRK	Merck & Co Inc	Merck & Co Inc	stocks	US Stocks	stocks	Stocks\US\MRK
+MRNA	MODERNA INC	MODERNA INC	stocks	US Stocks	stocks	Stocks\US\MRNA
+MRVL	Marvell Technology Group Ltd	Marvell Technology Group Ltd	stocks	US Stocks	stocks	Stocks\US\MRVL
+MS	Morgan Stanley	Morgan Stanley	stocks	US Stocks	stocks	Stocks\US\MS
+MSFT	MICROSOFT CORP	MICROSOFT CORP	stocks	US Stocks	stocks	Stocks\US\MSFT
+MSTR	Strategy Inc.	Strategy Inc.	stocks	US Stocks	stocks	Stocks\US\MSTR
+MU	Micron Technology Inc	Micron Technology Inc	stocks	US Stocks	stocks	Stocks\US\MU
+NEM	Newmont Mining	Newmont Mining	stocks	US Stocks	stocks	Stocks\US\NEM
+NFLX	NETFLIX INC	NETFLIX INC	stocks	US Stocks	stocks	Stocks\US\NFLX
+NIO	NIO INC - ADR	NIO INC - ADR	stocks	US Stocks	stocks	Stocks\US\NIO
+NKE	Nike Inc	Nike Inc	stocks	US Stocks	stocks	Stocks\US\NKE
+NOC	Northrop Grumman Corp	Northrop Grumman Corp	stocks	US Stocks	stocks	Stocks\US\NOC
+NOW	ServiceNow Inc	ServiceNow Inc	stocks	US Stocks	stocks	Stocks\US\NOW
+NTAP	Netapp Inc	Netapp Inc	stocks	US Stocks	stocks	Stocks\US\NTAP
+NTES	NETEASE INC-ADR	NETEASE INC-ADR	stocks	US Stocks	stocks	Stocks\US\NTES
+NVIDIA	NVIDIA CORP	NVIDIA CORP	stocks	US Stocks	stocks	Stocks\US\NVIDIA
+NVS	NOVARTIS AG-SPONSORED ADR	NOVARTIS AG-SPONSORED ADR	stocks	US Stocks	stocks	Stocks\US\NVS
+NWS	News Corp - Class B	News Corp - Class B	stocks	US Stocks	stocks	Stocks\US\NWS
+OKLO	Oklo Inc	Oklo Inc	stocks	US Stocks	stocks	Stocks\US\OKLO
+OKTA	Okta Inc	Okta Inc	stocks	US Stocks	stocks	Stocks\US\OKTA
+ORCL	ORACLE CORP	ORACLE CORP	stocks	US Stocks	stocks	Stocks\US\ORCL
+OXY	Occidental Petroleum Corp	Occidental Petroleum Corp	stocks	US Stocks	stocks	Stocks\US\OXY
+PDD	Pinduoduo Inc (ADRs)	Pinduoduo Inc (ADRs)	stocks	US Stocks	stocks	Stocks\US\PDD
+PEG	Public Service Enterprise Group / PSEG	Public Service Enterprise Group / PSEG	stocks	US Stocks	stocks	Stocks\US\PEG
+PENN	Penn National Gaming Inc	Penn National Gaming Inc	stocks	US Stocks	stocks	Stocks\US\PENN
+PEP	PEPSICO INC	PEPSICO INC	stocks	US Stocks	stocks	Stocks\US\PEP
+PFIZER	PFIZER INC	PFIZER INC	stocks	US Stocks	stocks	Stocks\US\PFIZER
+PG	PROCTER & GAMBLE CO/THE	PROCTER & GAMBLE CO/THE	stocks	US Stocks	stocks	Stocks\US\PG
+PGR	Progressive Corp	Progressive Corp	stocks	US Stocks	stocks	Stocks\US\PGR
+PLAY	Dave & Buster's Entertainmen	Dave & Buster's Entertainmen	stocks	US Stocks	stocks	Stocks\US\PLAY
+PLTR	Palantir Technologies Inc	Palantir Technologies Inc	stocks	US Stocks	stocks	Stocks\US\PLTR
+PM	PHILIP MORRIS INTERNATIONAL	PHILIP MORRIS INTERNATIONAL	stocks	US Stocks	stocks	Stocks\US\PM
+POOL	Pool Corp	Pool Corp	stocks	US Stocks	stocks	Stocks\US\POOL
+PPL	PPL Corp	PPL Corp	stocks	US Stocks	stocks	Stocks\US\PPL
+PSIX	Power Solutions International Inc	Power Solutions International Inc	stocks	US Stocks	crypto	Stocks\US\PSIX
+PVH	PVH Corp	PVH Corp	stocks	US Stocks	stocks	Stocks\US\PVH
+PYPL	PayPal Holdings Inc	PayPal Holdings Inc	stocks	US Stocks	stocks	Stocks\US\PYPL
+QCOM	QUALCOMM Inc	QUALCOMM Inc	stocks	US Stocks	stocks	Stocks\US\QCOM
+QQQ	Invesco QQQ Trust Series 1 ETF	Invesco QQQ Trust Series 1 ETF	stocks	US Stocks	stocks	Stocks\US\QQQ
+RACE	Ferrari NV	Ferrari NV	stocks	US Stocks	stocks	Stocks\US\RACE
+RBLX	Roblox Corp - Class A	Roblox Corp - Class A	stocks	US Stocks	stocks	Stocks\US\RBLX
+REGN	Regeneron Pharmaceuticals	Regeneron Pharmaceuticals	stocks	US Stocks	stocks	Stocks\US\REGN
+RF	Regions Financial Corp	Regions Financial Corp	stocks	US Stocks	stocks	Stocks\US\RF
+RIOT	Riot Platforms, Inc	Riot Platforms, Inc	stocks	US Stocks	stocks	Stocks\US\RIOT
+RIVN	Rivian Automotive Inc	Rivian Automotive Inc	stocks	US Stocks	stocks	Stocks\US\RIVN
+RKLB	Rocket Lab Corp	Rocket Lab Corp	stocks	US Stocks	stocks	Stocks\US\RKLB
+ROKU	Roku Inc	Roku Inc	stocks	US Stocks	stocks	Stocks\US\ROKU
+ROST	Ross Stores Inc	Ross Stores Inc	stocks	US Stocks	stocks	Stocks\US\ROST
+RSG	Republic Services Inc	Republic Services Inc	stocks	US Stocks	stocks	Stocks\US\RSG
+SBET	SharpLink Gaming Inc	SharpLink Gaming Inc	stocks	US Stocks	stocks	Stocks\US\SBET
+SBUX	STARBUCKS CORP	STARBUCKS CORP	stocks	US Stocks	stocks	Stocks\US\SBUX
+SE	SEA LTD-ADR	SEA LTD-ADR	stocks	US Stocks	stocks	Stocks\US\SE
+SHOP	SHOPIFY INC - CLASS A	SHOPIFY INC - CLASS A	stocks	US Stocks	stocks	Stocks\US\SHOP
+SIG	Signet Jewelers Ltd	Signet Jewelers Ltd	stocks	US Stocks	stocks	Stocks\US\SIG
+SMG	ScottsMiracle-Gro Co	ScottsMiracle-Gro Co	stocks	US Stocks	stocks	Stocks\US\SMG
+SNAP	Snap Inc	Snap Inc	stocks	US Stocks	stocks	Stocks\US\SNAP
+SNOW	SNOWFLAKE INC-CLASS A	SNOWFLAKE INC-CLASS A	stocks	US Stocks	stocks	Stocks\US\SNOW
+SNPS	Synopsys Inc	Synopsys Inc	stocks	US Stocks	stocks	Stocks\US\SNPS
+SOFI	SoFi Technologies Inc	SoFi Technologies Inc	stocks	US Stocks	stocks	Stocks\US\SOFI
+SPCE	VIRGIN GALACTIC HOLDINGS INC	VIRGIN GALACTIC HOLDINGS INC	stocks	US Stocks	stocks	Stocks\US\SPCE
+SPG	Simon Property Group Inc	Simon Property Group Inc	stocks	US Stocks	stocks	Stocks\US\SPG
+SPGI	S&P Global Inc	S&P Global Inc	stocks	US Stocks	stocks	Stocks\US\SPGI
+SPOT	Spotify Technology SA	Spotify Technology SA	stocks	US Stocks	stocks	Stocks\US\SPOT
+SRE	Sempra Energy	Sempra Energy	stocks	US Stocks	stocks	Stocks\US\SRE
+STRL	Sterling Infrastructure Inc	Sterling Infrastructure Inc	stocks	US Stocks	stocks	Stocks\US\STRL
+STX	Seagate	Seagate	stocks	US Stocks	stocks	Stocks\US\STX
+STZ	Constellation Brands Inc - Class A	Constellation Brands Inc - Class A	stocks	US Stocks	stocks	Stocks\US\STZ
+SWK	Stanley Black & Decker Inc	Stanley Black & Decker Inc	stocks	US Stocks	stocks	Stocks\US\SWK
+TCOM	Trip.com Group Ltd	Trip.com Group Ltd	stocks	US Stocks	stocks	Stocks\US\TCOM
+TEAM	Atlassian Corp PLC - Class A	Atlassian Corp PLC - Class A	stocks	US Stocks	stocks	Stocks\US\TEAM
+TFC	Truist Financial Corp	Truist Financial Corp	stocks	US Stocks	stocks	Stocks\US\TFC
+TGT	Target Corp	Target Corp	stocks	US Stocks	stocks	Stocks\US\TGT
+TLN	Talen Energy Corp	Talen Energy Corp	stocks	US Stocks	stocks	Stocks\US\TLN
+TME	Tencent Music Entertainment Group – ADR	Tencent Music Entertainment Group – ADR	stocks	US Stocks	stocks	Stocks\US\TME
+TOYOTA	TOYOTA MOTOR CORP -SPON ADR	TOYOTA MOTOR CORP -SPON ADR	stocks	US Stocks	stocks	Stocks\US\TOYOTA
+TQQQ	ProShares UltraPro QQQ ETF	ProShares UltraPro QQQ ETF	stocks	US Stocks	stocks	Stocks\US\TQQQ
+TRMB	TRIMBLE INC	TRIMBLE INC	stocks	US Stocks	stocks	Stocks\US\TRMB
+TROW	T. Rowe Price Group Inc	T. Rowe Price Group Inc	stocks	US Stocks	stocks	Stocks\US\TROW
+TRV	The Travelers Companies Inc	The Travelers Companies Inc	stocks	US Stocks	stocks	Stocks\US\TRV
+TSLA	Tesla	Tesla	stocks	US Stocks	stocks	Stocks\US\TSLA
+TSM	TAIWAN SEMICONDUCTOR-SP ADR	TAIWAN SEMICONDUCTOR-SP ADR	stocks	US Stocks	stocks	Stocks\US\TSM
+TTD	The Trade Desk Inc - Class A	The Trade Desk Inc - Class A	stocks	US Stocks	stocks	Stocks\US\TTD
+TTWO	Take-Two Interactive SoftwareInc	Take-Two Interactive SoftwareInc	stocks	US Stocks	stocks	Stocks\US\TTWO
+TWLO	Twilio Inc - Class A	Twilio Inc - Class A	stocks	US Stocks	stocks	Stocks\US\TWLO
+TXN	Texas Instruments Inc	Texas Instruments Inc	stocks	US Stocks	stocks	Stocks\US\TXN
+U	UNITY SOFTWARE INC	UNITY SOFTWARE INC	stocks	US Stocks	stocks	Stocks\US\U
+UBER	Uber Technologies Inc	Uber Technologies Inc	stocks	US Stocks	stocks	Stocks\US\UBER
+UL	Unilever Plc	Unilever Plc	stocks	US Stocks	stocks	Stocks\US\UL
+ULTA	Ulta Beauty Inc	Ulta Beauty Inc	stocks	US Stocks	stocks	Stocks\US\ULTA
+UMC	United Microelectronics Corp (ADRs)	United Microelectronics Corp (ADRs)	stocks	US Stocks	stocks	Stocks\US\UMC
+UNH	UNITEDHEALTH GROUP INC	UNITEDHEALTH GROUP INC	stocks	US Stocks	stocks	Stocks\US\UNH
+UPS	United Parcel Service Inc	United Parcel Service Inc	stocks	US Stocks	stocks	Stocks\US\UPS
+UPST	Upstart Holdings Inc	Upstart Holdings Inc	stocks	US Stocks	stocks	Stocks\US\UPST
+URNM	Sprott Uranium Miners ETF	Sprott Uranium Miners ETF	stocks	US Stocks	stocks	Stocks\US\URNM
+USB	U.S. Bancorp	U.S. Bancorp	stocks	US Stocks	stocks	Stocks\US\USB
+VISA	VISA INC-CLASS A SHARES	VISA INC-CLASS A SHARES	stocks	US Stocks	stocks	Stocks\US\VISA
+VRT	Vertiv Holdings Co	Vertiv Holdings Co	stocks	US Stocks	stocks	Stocks\US\VRT
+VZ	VERIZON COMMUNICATIONS INC	VERIZON COMMUNICATIONS INC	stocks	US Stocks	stocks	Stocks\US\VZ
+WDAY	Workday Inc - Class A	Workday Inc - Class A	stocks	US Stocks	stocks	Stocks\US\WDAY
+WDC	Western Digital Corp	Western Digital Corp	stocks	US Stocks	stocks	Stocks\US\WDC
+WEN	Wendy's Co	Wendy's Co	stocks	US Stocks	stocks	Stocks\US\WEN
+WFC	WELLS FARGO & CO	WELLS FARGO & CO	stocks	US Stocks	stocks	Stocks\US\WFC
+WM	Waste Management Inc	Waste Management Inc	stocks	US Stocks	stocks	Stocks\US\WM
+WMT	WALMART INC	WALMART INC	stocks	US Stocks	stocks	Stocks\US\WMT
+WPM	Wheaton Precious Metals Corp	Wheaton Precious Metals Corp	stocks	US Stocks	commodities	Stocks\US\WPM
+WU	Western Union Co	Western Union Co	stocks	US Stocks	stocks	Stocks\US\WU
+WY	Weyerhaeuser Co	Weyerhaeuser Co	stocks	US Stocks	stocks	Stocks\US\WY
+XPEV	XPENG INC - ADR	XPENG INC - ADR	stocks	US Stocks	stocks	Stocks\US\XPEV
+YUM	Yum! Brands Inc	Yum! Brands Inc	stocks	US Stocks	stocks	Stocks\US\YUM
+YUMC	Yum China Holdings Inc	Yum China Holdings Inc	stocks	US Stocks	stocks	Stocks\US\YUMC
+ZIM	Zim Integrated Shipping Services Ltd (ADRs)	Zim Integrated Shipping Services Ltd (ADRs)	stocks	US Stocks	stocks	Stocks\US\ZIM
+ZM	ZOOM VIDEO COMMUNICATIONS-A	ZOOM VIDEO COMMUNICATIONS-A	stocks	US Stocks	stocks	Stocks\US\ZM

@@ -24,7 +24,7 @@ class DistanceGridSearchSpace:
     entry_z: tuple[float, ...]
     exit_z: tuple[float, ...]
     stop_z: tuple[float | None, ...]
-    bollinger_k: tuple[float, ...]
+    bollinger_k: float
 
 
 @dataclass(slots=True)
@@ -78,7 +78,7 @@ class DistanceOptimizationResult:
 
 CancellationCheck = Callable[[], bool]
 ProgressCallback = Callable[[int, int, str], None]
-Candidate = tuple[int, int, int, int, int]
+Candidate = tuple[int, int, int, int]
 DistanceTask = tuple[int, DistanceParameters]
 CandidateTask = tuple[Candidate, int, DistanceParameters]
 
@@ -90,20 +90,36 @@ def _grid_values(raw: Any, *, cast: type[int] | type[float]) -> tuple[int, ...] 
         start = cast(raw["start"])
         stop = cast(raw["stop"])
         step = cast(raw.get("step", 1 if cast is int else 0.1))
-        if step == 0:
+        step_value = abs(float(step))
+        if step_value == 0.0:
             raise ValueError("Grid step cannot be zero.")
 
         values: list[int] | list[float] = []
         current = start
+        ascending = float(stop) >= float(start)
         if cast is int:
-            while current <= stop:
-                values.append(int(current))
-                current += step
+            step_int = int(step_value)
+            if step_int == 0:
+                raise ValueError("Integer grid step cannot round down to zero.")
+            if ascending:
+                while current <= stop:
+                    values.append(int(current))
+                    current += step_int
+            else:
+                while current >= stop:
+                    values.append(int(current))
+                    current -= step_int
         else:
-            epsilon = abs(float(step)) / 1_000_000.0
-            while float(current) <= float(stop) + epsilon:
-                values.append(round(float(current), 10))
-                current = cast(float(current) + float(step))
+            epsilon = step_value / 1_000_000.0
+            signed_step = step_value if ascending else -step_value
+            if ascending:
+                while float(current) <= float(stop) + epsilon:
+                    values.append(round(float(current), 10))
+                    current = cast(float(current) + signed_step)
+            else:
+                while float(current) >= float(stop) - epsilon:
+                    values.append(round(float(current), 10))
+                    current = cast(float(current) + signed_step)
         return tuple(values)
     raise TypeError(f"Unsupported grid values: {raw!r}")
 
@@ -124,13 +140,33 @@ def _optional_stop_values(raw: Any) -> tuple[float | None, ...]:
     return (float(raw),)
 
 
+def _fixed_float_value(raw: Any, *, fallback: float) -> float:
+    if raw is None:
+        return float(fallback)
+    if isinstance(raw, Mapping):
+        if "value" in raw:
+            return float(raw["value"])
+        if "start" in raw:
+            return float(raw["start"])
+        if "stop" in raw:
+            return float(raw["stop"])
+        raise TypeError(f"Unsupported fixed float mapping: {raw!r}")
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            if item is None or item == "":
+                continue
+            return float(item)
+        return float(fallback)
+    return float(raw)
+
+
 def parse_distance_search_space(search_space: Mapping[str, Any]) -> DistanceGridSearchSpace:
     return DistanceGridSearchSpace(
         lookback_bars=tuple(int(item) for item in _grid_values(search_space["lookback_bars"], cast=int)),
         entry_z=tuple(float(item) for item in _grid_values(search_space["entry_z"], cast=float)),
         exit_z=tuple(float(item) for item in _grid_values(search_space["exit_z"], cast=float)),
         stop_z=_optional_stop_values(search_space.get("stop_z")),
-        bollinger_k=tuple(float(item) for item in _grid_values(search_space["bollinger_k"], cast=float)),
+        bollinger_k=_fixed_float_value(search_space.get("bollinger_k"), fallback=2.0),
     )
 
 

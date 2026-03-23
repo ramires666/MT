@@ -6,6 +6,7 @@ from pathlib import Path
 from bokeh.models import Button, DateRangeSlider, Div, Select, Spinner
 
 from bokeh_app.browser_state import BrowserStateBinding
+import bokeh_app.file_state as file_state_module
 from bokeh_app.file_state import FileStateController
 
 
@@ -94,6 +95,69 @@ def test_file_state_restores_select_after_options_change() -> None:
 
         delayed_select.options = ['US2000', 'NAS100']
         assert delayed_select.value == 'NAS100'
+    finally:
+        if state_path.exists():
+            state_path.unlink()
+
+
+def test_file_state_persist_handles_reentrant_calls(monkeypatch) -> None:
+    state_path = Path('tests/.tmp_bokeh_file_state_reentrant.json')
+    if state_path.exists():
+        state_path.unlink()
+    original_atomic_write_json = file_state_module._atomic_write_json
+    try:
+        lookback = Spinner(value=96, low=1, step=1)
+        controller = FileStateController(state_path, [BrowserStateBinding('lookback', lookback)])
+        writes: list[int] = []
+
+        def fake_atomic_write_json(_path: Path, payload: dict[str, object]) -> None:
+            writes.append(int(payload['lookback']))
+            if len(writes) == 1:
+                lookback.value = 144
+                controller.persist()
+
+        monkeypatch.setattr(file_state_module, '_atomic_write_json', fake_atomic_write_json)
+        controller.persist()
+
+        assert writes == [96, 144]
+    finally:
+        monkeypatch.setattr(file_state_module, '_atomic_write_json', original_atomic_write_json)
+        if state_path.exists():
+            state_path.unlink()
+
+
+def test_file_state_persist_swallows_write_os_errors(monkeypatch) -> None:
+    state_path = Path('tests/.tmp_bokeh_file_state_error.json')
+    if state_path.exists():
+        state_path.unlink()
+    original_atomic_write_json = file_state_module._atomic_write_json
+    try:
+        lookback = Spinner(value=96, low=1, step=1)
+        controller = FileStateController(state_path, [BrowserStateBinding('lookback', lookback)])
+
+        def fake_atomic_write_json(_path: Path, _payload: dict[str, object]) -> None:
+            raise PermissionError('locked')
+
+        monkeypatch.setattr(file_state_module, '_atomic_write_json', fake_atomic_write_json)
+        controller.persist()
+    finally:
+        monkeypatch.setattr(file_state_module, '_atomic_write_json', original_atomic_write_json)
+        if state_path.exists():
+            state_path.unlink()
+
+
+def test_file_state_restore_skips_fractional_spinner_values() -> None:
+    state_path = Path('tests/.tmp_bokeh_file_state_fractional_low.json')
+    if state_path.exists():
+        state_path.unlink()
+    try:
+        state_path.write_text('{"opt_entry_start": 0}', encoding='utf-8')
+        spinner = Spinner(value=1.5, low=0.1, step=0.1)
+        controller = FileStateController(state_path, [BrowserStateBinding('opt_entry_start', spinner)])
+
+        controller.restore()
+
+        assert float(spinner.value) == 1.5
     finally:
         if state_path.exists():
             state_path.unlink()

@@ -6,10 +6,12 @@ from typing import Any, Mapping
 import numpy as np
 import polars as pl
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.tree import DecisionTreeRegressor
 
 from domain.meta_selector_types import FEATURE_COLUMNS, NUMERIC_FILL_COLUMNS, PARAMETER_COLUMNS
+
+XGBOOST_EARLY_STOPPING_ROUNDS = 30
 
 
 def with_time_columns(frame: pl.DataFrame) -> pl.DataFrame:
@@ -79,6 +81,7 @@ def normalized_model_config(model_type: str, config: Mapping[str, Any] | None = 
             "learning_rate": float(source.get("learning_rate", 0.05) or 0.05),
             "subsample": float(source.get("subsample", 0.9) or 0.9),
             "colsample_bytree": float(source.get("colsample_bytree", 0.9) or 0.9),
+            "early_stopping_rounds": int(source.get("early_stopping_rounds", XGBOOST_EARLY_STOPPING_ROUNDS) or XGBOOST_EARLY_STOPPING_ROUNDS),
         }
     raise ValueError(f"Unsupported meta-selector model: {model_type}")
 
@@ -118,6 +121,62 @@ def build_model(model_type: str, config: Mapping[str, Any] | None = None):
     raise ValueError(f"Unsupported meta-selector model: {model_type}")
 
 
+def _fit_with_optional_early_stopping(
+    model,
+    *,
+    model_type: str,
+    config: Mapping[str, Any] | None = None,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_validation: np.ndarray | None = None,
+    y_validation: np.ndarray | None = None,
+):
+    if model_type != "xgboost" or x_validation is None or y_validation is None or len(x_validation) == 0:
+        model.fit(x_train, y_train)
+        return model
+    try:
+        early_stopping_rounds = int((config or {}).get("early_stopping_rounds", XGBOOST_EARLY_STOPPING_ROUNDS) or XGBOOST_EARLY_STOPPING_ROUNDS)
+        model.set_params(early_stopping_rounds=early_stopping_rounds)
+    except (AttributeError, ValueError):
+        pass
+    fit_kwargs = {
+        "eval_set": [(x_validation, y_validation)],
+        "verbose": False,
+    }
+    try:
+        model.fit(x_train, y_train, **fit_kwargs)
+    except TypeError:
+        fit_kwargs.pop("verbose", None)
+        model.fit(x_train, y_train, **fit_kwargs)
+    return model
+
+
+def _xgboost_best_n_estimators(model, fallback_n_estimators: int) -> int:
+    fallback = max(1, int(fallback_n_estimators))
+    for attribute_name, offset in (("best_iteration", 1), ("best_iteration_", 1), ("best_ntree_limit", 0), ("best_ntree_limit_", 0)):
+        raw_value = getattr(model, attribute_name, None)
+        if raw_value is None:
+            continue
+        try:
+            resolved = int(raw_value) + offset
+        except (TypeError, ValueError):
+            continue
+        return max(1, min(fallback, resolved))
+    return fallback
+
+
+def _regression_quality(prefix: str, y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float | None]:
+    if len(y_true) == 0:
+        return {}
+    mse = float(mean_squared_error(y_true, y_pred))
+    return {
+        f"{prefix}_mae": float(mean_absolute_error(y_true, y_pred)),
+        f"{prefix}_mse": mse,
+        f"{prefix}_rmse": float(np.sqrt(max(0.0, mse))),
+        f"{prefix}_r2": float(r2_score(y_true, y_pred)) if len(y_true) > 1 else None,
+    }
+
+
 def window_key_expr() -> pl.Expr:
     return pl.concat_str([
         pl.col("test_started_at").dt.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -135,6 +194,12 @@ def with_window_key(frame: pl.DataFrame) -> pl.DataFrame:
     if "test_started_at" in result.columns and "test_ended_at" in result.columns:
         return result.with_columns(window_key_expr())
     return result
+
+
+def objective_score_columns(frame: pl.DataFrame) -> tuple[str, str]:
+    train_score_column = "train_objective_score" if "train_objective_score" in frame.columns else "train_score_log_trades"
+    test_score_column = "test_objective_score" if "test_objective_score" in frame.columns else "test_score_log_trades"
+    return train_score_column, test_score_column
 
 
 def validation_split(frame: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -161,9 +226,10 @@ def fit_predict(
     model_type: str,
     target_metric: str,
     model_config: Mapping[str, Any] | None = None,
-) -> tuple[np.ndarray, int, int, float | None, float | None]:
+) -> tuple[np.ndarray, int, int, float | None, float | None, dict[str, Any]]:
     training = with_engineered_columns(training_frame)
     scoring = with_engineered_columns(scoring_frame)
+    normalized_config = normalized_model_config(model_type, model_config)
     if target_metric not in training.columns:
         raise ValueError(f"Target metric '{target_metric}' is not available in WFA history.")
     if training.height < 4:
@@ -175,27 +241,64 @@ def fit_predict(
     validation_r2 = None
     train_rows = training.height
     validation_rows = 0
+    final_model_config = dict(normalized_config)
+    quality_metrics: dict[str, Any] = {}
     if not split_validation.is_empty() and split_train.height >= 3:
-        model = build_model(model_type, model_config)
+        model = build_model(model_type, normalized_config)
         x_train = split_train.select(FEATURE_COLUMNS).to_numpy()
         y_train = split_train.get_column(target_metric).to_numpy()
         x_validation = split_validation.select(FEATURE_COLUMNS).to_numpy()
         y_validation = split_validation.get_column(target_metric).to_numpy()
-        model.fit(x_train, y_train)
+        model = _fit_with_optional_early_stopping(
+            model,
+            model_type=model_type,
+            config=normalized_config,
+            x_train=x_train,
+            y_train=y_train,
+            x_validation=x_validation,
+            y_validation=y_validation,
+        )
+        train_pred = model.predict(x_train)
         validation_pred = model.predict(x_validation)
+        quality_metrics.update(_regression_quality("split_train", y_train, train_pred))
+        quality_metrics.update(_regression_quality("validation", y_validation, validation_pred))
         validation_mae = float(mean_absolute_error(y_validation, validation_pred))
         validation_r2 = float(r2_score(y_validation, validation_pred)) if len(y_validation) > 1 else None
         train_rows = split_train.height
         validation_rows = split_validation.height
+        if model_type == "xgboost":
+            best_n_estimators = _xgboost_best_n_estimators(
+                model,
+                int(final_model_config.get("n_estimators", 1) or 1),
+            )
+            final_model_config["n_estimators"] = best_n_estimators
+            quality_metrics.update(
+                {
+                    "xgboost_early_stopping_rounds": int(normalized_config.get("early_stopping_rounds", XGBOOST_EARLY_STOPPING_ROUNDS) or XGBOOST_EARLY_STOPPING_ROUNDS),
+                    "xgboost_best_iteration": getattr(model, "best_iteration", getattr(model, "best_iteration_", None)),
+                    "xgboost_best_n_estimators": int(best_n_estimators),
+                }
+            )
 
-    final_model = build_model(model_type, model_config)
-    final_model.fit(training.select(FEATURE_COLUMNS).to_numpy(), training.get_column(target_metric).to_numpy())
+    final_model = build_model(model_type, final_model_config)
+    x_training = training.select(FEATURE_COLUMNS).to_numpy()
+    y_training = training.get_column(target_metric).to_numpy()
+    final_model.fit(x_training, y_training)
+    training_pred = final_model.predict(x_training)
+    quality_metrics.update(_regression_quality("train", y_training, training_pred))
+    if model_type == "xgboost":
+        quality_metrics.setdefault(
+            "xgboost_early_stopping_rounds",
+            int(normalized_config.get("early_stopping_rounds", XGBOOST_EARLY_STOPPING_ROUNDS) or XGBOOST_EARLY_STOPPING_ROUNDS),
+        )
+        quality_metrics["xgboost_final_n_estimators"] = int(final_model_config.get("n_estimators", normalized_config.get("n_estimators", 1)) or 1)
     predictions = np.asarray(final_model.predict(x_score), dtype=np.float64) if scoring.height else np.asarray([], dtype=np.float64)
-    return predictions, train_rows, validation_rows, validation_mae, validation_r2
+    return predictions, train_rows, validation_rows, validation_mae, validation_r2, quality_metrics
 
 
 def rank_parameter_sets(frame: pl.DataFrame, predictions: np.ndarray) -> list[dict[str, Any]]:
     enriched = with_window_key(with_engineered_columns(frame)).with_columns(pl.Series("predicted_target", predictions))
+    train_score_column, test_score_column = objective_score_columns(enriched)
     grouped = (
         enriched.group_by(PARAMETER_COLUMNS)
         .agg(
@@ -203,11 +306,11 @@ def rank_parameter_sets(frame: pl.DataFrame, predictions: np.ndarray) -> list[di
             pl.col("fold").n_unique().alias("folds"),
             pl.col("predicted_target").mean().alias("predicted_mean"),
             pl.col("predicted_target").std(ddof=0).fill_null(0.0).alias("predicted_std"),
-            pl.col("test_score_log_trades").mean().alias("actual_test_score_mean"),
+            pl.col(test_score_column).mean().alias("actual_test_score_mean"),
             pl.col("test_net_profit").mean().alias("actual_test_net_mean"),
             pl.col("test_max_drawdown").mean().alias("actual_test_maxdd_mean"),
             pl.col("test_trades").mean().alias("actual_test_trades_mean"),
-            pl.col("train_score_log_trades").mean().alias("train_score_mean"),
+            pl.col(train_score_column).mean().alias("train_score_mean"),
             pl.col("train_net_profit").mean().alias("train_net_mean"),
             pl.col("train_pnl_to_maxdd").mean().alias("train_pnl_to_maxdd_mean"),
         )
@@ -253,10 +356,11 @@ def select_rows_per_fold(frame: pl.DataFrame, predictions: np.ndarray) -> pl.Dat
     enriched = with_window_key(with_engineered_columns(frame)).with_columns(pl.Series("predicted_target", predictions))
     if enriched.is_empty():
         return enriched
+    train_score_column, _test_score_column = objective_score_columns(enriched)
     return (
         enriched
         .sort(
-            ["test_started_at", "predicted_target", "train_score_log_trades", "train_net_profit", "train_pnl_to_maxdd", "trial_id"],
+            ["test_started_at", "predicted_target", train_score_column, "train_net_profit", "train_pnl_to_maxdd", "trial_id"],
             descending=[False, True, True, True, True, False],
         )
         .group_by("window_key", maintain_order=True)

@@ -238,12 +238,12 @@ def _evaluate_candidate_tasks_parallel(
 
 
 def iter_distance_parameter_grid(search_space: DistanceGridSearchSpace) -> Iterable[DistanceParameters]:
-    for lookback_bars, entry_z, exit_z, stop_z, bollinger_k in product(
+    fixed_bollinger_k = float(search_space.bollinger_k)
+    for lookback_bars, entry_z, exit_z, stop_z in product(
         search_space.lookback_bars,
         search_space.entry_z,
         search_space.exit_z,
         search_space.stop_z,
-        search_space.bollinger_k,
     ):
         if exit_z >= entry_z or (stop_z is not None and stop_z <= entry_z):
             continue
@@ -252,7 +252,7 @@ def iter_distance_parameter_grid(search_space: DistanceGridSearchSpace) -> Itera
             entry_z=float(entry_z),
             exit_z=float(exit_z),
             stop_z=None if stop_z is None else float(stop_z),
-            bollinger_k=float(bollinger_k),
+            bollinger_k=fixed_bollinger_k,
         )
 
 

@@ -16,6 +16,13 @@ from domain.scan.johansen_models import (
 from domain.scan.unit_root import screen_pair_for_cointegration
 
 
+def validate_det_order(det_order: int) -> None:
+    if int(det_order) not in (-1, 0, 1):
+        raise ValueError(
+            f"Unsupported Johansen det_order={det_order}. statsmodels coint_johansen supports only -1, 0, 1."
+        )
+
+
 def critical_column(significance_level: float) -> tuple[int, str]:
     options = {0.10: (0, "90%"), 0.05: (1, "95%"), 0.01: (2, "99%")}
     level = min(options, key=lambda current: abs(current - significance_level))
@@ -132,6 +139,7 @@ def scan_pair_johansen_arrays(
     unit_root_gate: UnitRootGate,
     params: JohansenScanParameters,
 ) -> JohansenPairScanResult:
+    validate_det_order(params.det_order)
     series_1, series_2, transformed_mode = prepare_series(
         leg_1_values,
         leg_2_values,

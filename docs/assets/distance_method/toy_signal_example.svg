@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="430" viewBox="0 0 1100 430">
+  <rect width="1100" height="430" fill="#fffdf8"/>
+  <text x="60" y="52" font-size="30" font-family="Segoe UI, Arial, sans-serif" fill="#0f172a" font-weight="700">Toy Z-Score Path</text>
+  <text x="60" y="82" font-size="16" font-family="Segoe UI, Arial, sans-serif" fill="#475569">Same short-spread entry, two different exits: positive exit_z vs negative exit_z.</text>
+
+  <line x1="90" y1="320" x2="1020" y2="320" stroke="#cbd5e1" stroke-width="2"/>
+  <line x1="90" y1="210" x2="1020" y2="210" stroke="#f59e0b" stroke-width="2" stroke-dasharray="8 8"/>
+  <line x1="90" y1="235" x2="1020" y2="235" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 6"/>
+  <line x1="90" y1="210" x2="1020" y2="210" opacity="0"/>
+  <line x1="90" y1="265" x2="1020" y2="265" stroke="#22c55e" stroke-width="2" stroke-dasharray="8 8"/>
+  <line x1="90" y1="235" x2="1020" y2="235" stroke="#64748b" stroke-width="2"/>
+  <line x1="90" y1="140" x2="90" y2="340" stroke="#64748b" stroke-width="2"/>
+
+  <text x="64" y="216" font-size="14" font-family="Segoe UI, Arial, sans-serif" fill="#92400e">+1.0</text>
+  <text x="56" y="239" font-size="14" font-family="Segoe UI, Arial, sans-serif" fill="#334155">0.0</text>
+  <text x="48" y="270" font-size="14" font-family="Segoe UI, Arial, sans-serif" fill="#166534">-1.0</text>
+
+  <polyline fill="none" stroke="#f97316" stroke-width="4" points="150,235 220,235 290,235 360,165 430,182 500,250 570,265 640,265 710,250 780,235 850,235 920,235"/>
+
+  <circle cx="360" cy="165" r="7" fill="#dc2626"/>
+  <circle cx="570" cy="265" r="7" fill="#0ea5e9"/>
+  <circle cx="640" cy="265" r="7" fill="#16a34a"/>
+
+  <line x1="430" y1="120" x2="430" y2="320" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 6"/>
+  <text x="430" y="112" text-anchor="middle" font-size="14" font-family="Segoe UI, Arial, sans-serif" fill="#dc2626" font-weight="700">entry fill</text>
+
+  <line x1="570" y1="120" x2="570" y2="320" stroke="#0ea5e9" stroke-width="2" stroke-dasharray="6 6"/>
+  <text x="570" y="112" text-anchor="middle" font-size="14" font-family="Segoe UI, Arial, sans-serif" fill="#0ea5e9" font-weight="700">exit_z = 0.2</text>
+
+  <line x1="640" y1="120" x2="640" y2="320" stroke="#16a34a" stroke-width="2" stroke-dasharray="6 6"/>
+  <text x="640" y="112" text-anchor="middle" font-size="14" font-family="Segoe UI, Arial, sans-serif" fill="#16a34a" font-weight="700">exit_z = -1.0</text>
+
+  <text x="150" y="360" font-size="15" font-family="Segoe UI, Arial, sans-serif" fill="#334155">Orange line: z-score path from the toy example.</text>
+  <text x="150" y="384" font-size="15" font-family="Segoe UI, Arial, sans-serif" fill="#334155">Blue exit: normal mean-reversion exit. Green exit: opposite-signal exit after crossing to the other side.</text>
+</svg>
