@@ -79,7 +79,18 @@ from domain.wfa import run_distance_genetic_wfa
 from domain.wfa_serialization import serialize_time
 from domain.meta_selector import DEFAULT_META_TARGET, SUPPORTED_META_MODELS, load_saved_meta_selector_result, run_meta_selector
 from domain.meta_selector_ml import normalized_model_config
+from domain.portfolio import (
+    PortfolioAllocationSuggestionRow,
+    PortfolioCorrelationRow,
+    PortfolioCurve,
+    PortfolioRunRow,
+    analyze_portfolio_curves,
+    combine_portfolio_equity_curves,
+    latest_portfolio_oos_started_at,
+    scale_defaults_for_portfolio_item,
+)
 from storage.paths import ui_state_path
+from storage.portfolio_store import build_portfolio_item, load_portfolio_items, remove_portfolio_items, upsert_portfolio_item
 from tools.mt5_export_catalog_sync import build_jobs, chunked, resolve_symbols, symbol_partitions_exist
 from tools.mt5_terminal_export_sync import decode_exports, default_common_root, read_export_statuses, run_terminal_export, write_job_manifest, write_startup_config
 from storage.scan_results import (
@@ -106,6 +117,7 @@ NO_CO_MOVER_GROUP_LABEL = "-- no co-mover groups --"
 DOWNLOAD_SCOPE_OPTIONS = ["symbol", "group"]
 DOWNLOAD_POLICY_OPTIONS = ["missing_only", "force"]
 WFA_UNIT_OPTIONS = [item.value for item in WfaWindowUnit]
+PORTFOLIO_ALLOCATION_OPTIONS = ["equal_weight", "diversified_risk"]
 DEFAULT_MT5_TERMINAL_PATH = r"C:\Program Files\Bybit MT5 Terminal\terminal64.exe"
 def _build_figure(title: str, shared_x_range: Range1d, ylabel: str, height: int) -> figure:
     plot = figure(
@@ -251,6 +263,13 @@ def build_document() -> None:
     meta_future: Future[tuple[dict[str, object], PairSelection]] | None = None
     meta_poll_callback: object | None = None
     displayed_meta_signature: dict[str, object] | None = None
+    portfolio_run_rows_by_id: dict[str, PortfolioRunRow] = {}
+    current_tester_context: dict[str, object] = {
+        "source_kind": "tester_manual",
+        "oos_started_at": None,
+        "context_started_at": None,
+        "context_ended_at": None,
+    }
     service_log_lines: list[str] = []
     service_log_last_message: dict[str, str] = {}
 
@@ -300,6 +319,7 @@ def build_document() -> None:
     stop_input = Spinner(title="Stop Z", low=0.1, step=0.1, value=3.5)
     bollinger_input = Spinner(title="Bollinger K", low=0.1, step=0.1, value=2.0)
     run_button = Button(label="Run Test", button_type="success")
+    add_to_portfolio_button = Button(label="В портфель", button_type="default")
 
     universe_group_row = row(
         group_select,
@@ -312,6 +332,13 @@ def build_document() -> None:
         symbol_2_select,
         sizing_mode="stretch_width",
         styles={"gap": "12px", "align-items": "flex-end"},
+    )
+
+    run_controls_row = row(
+        run_button,
+        add_to_portfolio_button,
+        sizing_mode="stretch_width",
+        styles={"gap": "12px"},
     )
 
     sidebar = column(
@@ -338,7 +365,7 @@ def build_document() -> None:
         margin_budget_input,
         slippage_input,
         bybit_fee_mode_select,
-        run_button,
+        run_controls_row,
         summary_div,
         sizing_mode="stretch_height",
         width=340,
@@ -519,6 +546,10 @@ def build_document() -> None:
     equity_plot.line("x", "leg1", source=state.equity_source, line_width=1.5, color="#22d3ee", legend_label="Leg 1 Equity", y_range_name="equity")
     equity_plot.line("x", "leg2", source=state.equity_source, line_width=1.5, color="#16a34a", legend_label="Leg 2 Equity", y_range_name="equity")
     equity_plot.add_layout(Span(location=0.0, dimension="width", line_color="#94a3b8", line_alpha=0.35, line_width=1.0))
+    optimization_train_box = BoxAnnotation(fill_color="#9ca3af", fill_alpha=0.10, line_alpha=0.0, visible=False)
+    optimization_train_start_span = Span(location=0.0, dimension="height", line_color="#6b7280", line_alpha=0.75, line_width=2, line_dash="dashed", visible=False)
+    equity_plot.add_layout(optimization_train_box)
+    equity_plot.add_layout(optimization_train_start_span)
     equity_plot.legend.location = "top_center"
     equity_plot.legend.background_fill_alpha = 0.0
     equity_plot.legend.border_line_alpha = 0.0
@@ -1106,7 +1137,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     wfa_equity_plot.xaxis.minor_tick_line_width = 1
     wfa_equity_plot.xgrid.grid_line_alpha = 0.16
     wfa_equity_plot.xgrid.grid_line_color = "#94a3b8"
+    wfa_train_window_box = BoxAnnotation(fill_color="#9ca3af", fill_alpha=0.12, line_alpha=0.0, visible=False)
+    wfa_train_start_span = Span(location=0.0, dimension="height", line_color="#6b7280", line_alpha=0.75, line_width=2, line_dash="dashed", visible=False)
     wfa_test_window_box = BoxAnnotation(fill_color="#0ea5e9", fill_alpha=0.10, line_color="#0284c7", line_alpha=0.45, line_width=2, visible=False)
+    wfa_equity_plot.add_layout(wfa_train_window_box)
+    wfa_equity_plot.add_layout(wfa_train_start_span)
     wfa_equity_plot.add_layout(wfa_test_window_box)
     wfa_equity_plot.line("time", "equity", source=wfa_equity_source, line_width=2.5, color="#0f766e")
     wfa_table = DataTable(
@@ -1450,6 +1485,215 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         styles={"gap": "10px"},
     )
 
+    def empty_portfolio_table_data() -> dict[str, list[object]]:
+        return {
+            "item_id": [],
+            "saved_at": [],
+            "source_kind": [],
+            "symbol_1": [],
+            "symbol_2": [],
+            "timeframe": [],
+            "oos_started_at_label": [],
+            "lookback_bars": [],
+            "entry_z": [],
+            "exit_z": [],
+            "stop_z_label": [],
+            "bollinger_k": [],
+            "allocation_capital": [],
+            "net_profit": [],
+            "ending_equity": [],
+            "max_drawdown": [],
+            "trades": [],
+            "run_status": [],
+        }
+
+    def portfolio_items_to_source(items: list, run_rows_by_id: dict[str, PortfolioRunRow] | None = None) -> dict[str, list[object]]:
+        rows = empty_portfolio_table_data()
+        lookup = run_rows_by_id or {}
+        for item in items:
+            run_row = lookup.get(item.item_id)
+            rows["item_id"].append(item.item_id)
+            rows["saved_at"].append(item.saved_at)
+            rows["source_kind"].append(item.source_kind)
+            rows["symbol_1"].append(item.symbol_1)
+            rows["symbol_2"].append(item.symbol_2)
+            rows["timeframe"].append(item.timeframe.value)
+            rows["oos_started_at_label"].append("" if item.oos_started_at is None else f"{item.oos_started_at:%Y-%m-%d}")
+            rows["lookback_bars"].append(int(item.lookback_bars))
+            rows["entry_z"].append(float(item.entry_z))
+            rows["exit_z"].append(float(item.exit_z))
+            rows["stop_z_label"].append("disabled" if item.stop_z is None else f"{float(item.stop_z):.2f}")
+            rows["bollinger_k"].append(float(item.bollinger_k))
+            rows["allocation_capital"].append(None if run_row is None else float(run_row.allocation_capital))
+            rows["net_profit"].append(None if run_row is None or run_row.net_profit is None else float(run_row.net_profit))
+            rows["ending_equity"].append(None if run_row is None or run_row.ending_equity is None else float(run_row.ending_equity))
+            rows["max_drawdown"].append(None if run_row is None or run_row.max_drawdown is None else float(run_row.max_drawdown))
+            rows["trades"].append(None if run_row is None or run_row.trades is None else int(run_row.trades))
+            rows["run_status"].append("" if run_row is None else run_row.status)
+        return rows
+
+    def empty_portfolio_weight_data() -> dict[str, list[object]]:
+        return {
+            "item_id": [],
+            "label": [],
+            "return_volatility": [],
+            "mean_abs_return_corr": [],
+            "diversification_score": [],
+            "suggested_weight_pct": [],
+        }
+
+    def empty_portfolio_correlation_data() -> dict[str, list[object]]:
+        return {
+            "left_label": [],
+            "right_label": [],
+            "equity_corr": [],
+            "return_corr": [],
+        }
+
+    def portfolio_weight_rows_to_source(rows: list[PortfolioAllocationSuggestionRow]) -> dict[str, list[object]]:
+        data = empty_portfolio_weight_data()
+        for row in rows:
+            data["item_id"].append(row.item_id)
+            data["label"].append(row.label)
+            data["return_volatility"].append(float(row.return_volatility))
+            data["mean_abs_return_corr"].append(float(row.mean_abs_return_corr))
+            data["diversification_score"].append(float(row.diversification_score))
+            data["suggested_weight_pct"].append(float(row.suggested_weight) * 100.0)
+        return data
+
+    def portfolio_correlation_rows_to_source(rows: list[PortfolioCorrelationRow]) -> dict[str, list[object]]:
+        data = empty_portfolio_correlation_data()
+        for row in rows:
+            data["left_label"].append(row.left_label)
+            data["right_label"].append(row.right_label)
+            data["equity_corr"].append(float(row.equity_corr))
+            data["return_corr"].append(float(row.return_corr))
+        return data
+
+    portfolio_table_source = ColumnDataSource(empty_portfolio_table_data())
+    portfolio_equity_source = ColumnDataSource({"time": [], "equity": []})
+    portfolio_weight_source = ColumnDataSource(empty_portfolio_weight_data())
+    portfolio_correlation_source = ColumnDataSource(empty_portfolio_correlation_data())
+    portfolio_period_slider = DateRangeSlider(
+        title="Portfolio Period",
+        start=_ui_datetime(history_start),
+        end=_ui_datetime(now_utc),
+        value=(_ui_datetime(history_start), _ui_datetime(now_utc)),
+    )
+    portfolio_allocation_select = Select(title="Allocation", value=PORTFOLIO_ALLOCATION_OPTIONS[0], options=PORTFOLIO_ALLOCATION_OPTIONS, width=170)
+    portfolio_run_button = Button(label="Run Portfolio", button_type="primary", width=130)
+    portfolio_analyze_button = Button(label="Analyze Portfolio", button_type="default", width=150)
+    portfolio_reload_button = Button(label="Reload", button_type="default", width=90)
+    portfolio_remove_button = Button(label="Remove Selected", button_type="default", width=140)
+    portfolio_status_div = Div(text="<p>Portfolio is empty. Use <b>В портфель</b> in the tester to save pairs and strategy parameters.</p>")
+    portfolio_analysis_div = Div(
+        text=(
+            "<p>Use <b>Analyze Portfolio</b> to calculate pairwise equity/return correlations and get "
+            "a diversification-weight suggestion. The second allocation mode, <b>diversified_risk</b>, "
+            "uses inverse return volatility penalized by mean absolute return correlation.</p>"
+        )
+    )
+    portfolio_equity_plot = figure(
+        title="Portfolio Equity",
+        x_axis_type="datetime",
+        x_range=Range1d(start=_datetime_to_bokeh_millis(history_start), end=_datetime_to_bokeh_millis(now_utc)),
+        y_range=Range1d(start=0.0, end=1.0),
+        height=260,
+        sizing_mode="stretch_width",
+        tools="pan,wheel_zoom,box_zoom,reset,save",
+        active_scroll="wheel_zoom",
+    )
+    portfolio_wheel_zoom = portfolio_equity_plot.select_one(WheelZoomTool)
+    if portfolio_wheel_zoom is not None:
+        portfolio_wheel_zoom.modifiers = {"ctrl": True}
+    portfolio_equity_plot.toolbar.autohide = True
+    portfolio_equity_plot.yaxis.axis_label = "Equity"
+    portfolio_oos_cutoff_span = Span(location=0.0, dimension="height", line_color="#dc2626", line_alpha=0.60, line_width=2, line_dash="dashed", visible=False)
+    portfolio_equity_plot.add_layout(portfolio_oos_cutoff_span)
+    portfolio_equity_plot.line("time", "equity", source=portfolio_equity_source, line_width=2.5, color="#0f172a")
+    portfolio_table = DataTable(
+        source=portfolio_table_source,
+        columns=[
+            TableColumn(field="saved_at", title="Saved", formatter=DateFormatter(format="%Y-%m-%d %H:%M"), width=122),
+            TableColumn(field="source_kind", title="Source", width=112),
+            TableColumn(field="symbol_1", title="Symbol 1", width=96),
+            TableColumn(field="symbol_2", title="Symbol 2", width=96),
+            TableColumn(field="timeframe", title="TF", width=54),
+            TableColumn(field="oos_started_at_label", title="OOS", width=86),
+            TableColumn(field="lookback_bars", title="Lookback", formatter=NumberFormatter(format="0"), width=82),
+            TableColumn(field="entry_z", title="Entry", formatter=NumberFormatter(format="0.00"), width=68),
+            TableColumn(field="exit_z", title="Exit", formatter=NumberFormatter(format="0.00"), width=68),
+            TableColumn(field="stop_z_label", title="Stop", width=72),
+            TableColumn(field="bollinger_k", title="Boll", formatter=NumberFormatter(format="0.00"), width=68),
+            TableColumn(field="allocation_capital", title="Alloc", formatter=NumberFormatter(format="0.00"), width=88),
+            TableColumn(field="net_profit", title="Net", formatter=NumberFormatter(format="0.00"), width=88),
+            TableColumn(field="ending_equity", title="Ending", formatter=NumberFormatter(format="0.00"), width=88),
+            TableColumn(field="max_drawdown", title="Max DD", formatter=NumberFormatter(format="0.00"), width=88),
+            TableColumn(field="trades", title="Trades", formatter=NumberFormatter(format="0"), width=68),
+            TableColumn(field="run_status", title="Run", width=92),
+        ],
+        sizing_mode="stretch_width",
+        height=260,
+        sortable=True,
+        reorderable=False,
+        index_position=None,
+    )
+    portfolio_weight_table = DataTable(
+        source=portfolio_weight_source,
+        columns=[
+            TableColumn(field="label", title="Pair", width=220),
+            TableColumn(field="return_volatility", title="Ret Vol", formatter=NumberFormatter(format="0.000000"), width=98),
+            TableColumn(field="mean_abs_return_corr", title="Mean |Ret Corr|", formatter=NumberFormatter(format="0.000"), width=110),
+            TableColumn(field="diversification_score", title="Score", formatter=NumberFormatter(format="0.000"), width=86),
+            TableColumn(field="suggested_weight_pct", title="Suggested %", formatter=NumberFormatter(format="0.00"), width=92),
+        ],
+        sizing_mode="stretch_width",
+        height=200,
+        sortable=True,
+        reorderable=False,
+        index_position=None,
+    )
+    portfolio_correlation_table = DataTable(
+        source=portfolio_correlation_source,
+        columns=[
+            TableColumn(field="left_label", title="Pair A", width=220),
+            TableColumn(field="right_label", title="Pair B", width=220),
+            TableColumn(field="equity_corr", title="Equity Corr", formatter=NumberFormatter(format="0.000"), width=96),
+            TableColumn(field="return_corr", title="Return Corr", formatter=NumberFormatter(format="0.000"), width=96),
+        ],
+        sizing_mode="stretch_width",
+        height=220,
+        sortable=True,
+        reorderable=False,
+        index_position=None,
+    )
+    portfolio_controls = column(
+        row(
+            portfolio_period_slider,
+            portfolio_allocation_select,
+            portfolio_run_button,
+            portfolio_analyze_button,
+            portfolio_reload_button,
+            portfolio_remove_button,
+            sizing_mode="stretch_width",
+            styles={"gap": "12px", "align-items": "flex-end"},
+        ),
+        portfolio_status_div,
+        portfolio_analysis_div,
+        sizing_mode="stretch_width",
+        styles={"gap": "10px"},
+    )
+    portfolio_content = column(
+        portfolio_controls,
+        portfolio_equity_plot,
+        portfolio_table,
+        Div(text="<b>Portfolio Allocation Analysis</b>"),
+        portfolio_weight_table,
+        portfolio_correlation_table,
+        sizing_mode="stretch_width",
+        styles={"gap": "10px"},
+    )
+
     plot_font_size_input = Spinner(title="Plot Font", low=8, high=24, step=1, value=11, width=92)
     plot_height_single_input = Spinner(title="1 Plot", low=160, step=20, value=560, width=92)
     plot_height_two_input = Spinner(title="2 Plots", low=160, step=20, value=420, width=92)
@@ -1495,6 +1739,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     equity_section, equity_body, equity_toggle = _build_section("Equity", equity_plot)
     trades_block, trades_body, trades_toggle = _build_section("Trades", trades_content)
     zscore_metrics_block, zscore_metrics_body, zscore_metrics_toggle = _build_section("Z-score Metrics", zscore_metrics_content)
+    portfolio_block, portfolio_body, portfolio_toggle = _build_section("Portfolio", portfolio_content)
     optimization_block, optimization_body, optimization_toggle = _build_section("Optimization Results", optimization_content)
     display_block, display_body, display_toggle = _build_section("Display", display_content)
     wfa_block, wfa_body, wfa_toggle = _build_section("WFA", wfa_content)
@@ -1531,6 +1776,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     block_bindings = [
         ("trades", trades_body, trades_toggle),
         ("zscore_metrics", zscore_metrics_body, zscore_metrics_toggle),
+        ("portfolio", portfolio_body, portfolio_toggle),
         ("optimization", optimization_body, optimization_toggle),
         ("display", display_body, display_toggle),
         ("wfa", wfa_body, wfa_toggle),
@@ -1620,6 +1866,8 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         BrowserStateBinding("download_symbol", download_symbol_select, kind="select", restore_on_options_change=True),
         BrowserStateBinding("download_policy", download_policy_select, kind="select"),
         BrowserStateBinding("download_period", download_period_slider, kind="range"),
+        BrowserStateBinding("portfolio_period", portfolio_period_slider, kind="range"),
+        BrowserStateBinding("portfolio_allocation", portfolio_allocation_select, kind="select"),
         BrowserStateBinding("show_price_1", price_1_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_price_2", price_2_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_spread", spread_body, property_name="visible", kind="visible"),
@@ -1627,6 +1875,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         BrowserStateBinding("show_equity", equity_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_trades", trades_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_zscore_metrics", zscore_metrics_body, property_name="visible", kind="visible"),
+        BrowserStateBinding("show_portfolio", portfolio_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_optimization", optimization_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_display", display_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_wfa", wfa_body, property_name="visible", kind="visible"),
@@ -1933,6 +2182,38 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             span.location = location
             span.visible = should_show
 
+    def sync_optimization_train_overlay(*, test_started_at: datetime | None, test_ended_at: datetime | None) -> None:
+        if test_started_at is None or test_ended_at is None:
+            optimization_train_box.visible = False
+            optimization_train_start_span.visible = False
+            return
+        train_started_at = _coerce_datetime(optimization_period_slider.value[0])
+        train_ended_at = _coerce_datetime(optimization_period_slider.value[1])
+        overlap_started_at = max(test_started_at, train_started_at)
+        overlap_ended_at = min(test_ended_at, train_ended_at)
+        if overlap_started_at >= overlap_ended_at:
+            optimization_train_box.visible = False
+            optimization_train_start_span.visible = False
+            return
+        left = _nearest_bar_x(overlap_started_at)
+        right = _nearest_bar_x(overlap_ended_at)
+        if left is None or right is None or right <= left:
+            optimization_train_box.visible = False
+            optimization_train_start_span.visible = False
+            return
+        optimization_train_box.left = left
+        optimization_train_box.right = right
+        optimization_train_box.visible = True
+        if test_started_at <= train_started_at <= test_ended_at:
+            start_location = _nearest_bar_x(train_started_at)
+            if start_location is None:
+                optimization_train_start_span.visible = False
+            else:
+                optimization_train_start_span.location = start_location
+                optimization_train_start_span.visible = True
+        else:
+            optimization_train_start_span.visible = False
+
     def clear_zscore_diagnostics_outputs() -> None:
         zscore_metrics_source.data = empty_zscore_metric_source()
         zscore_hist_source.data = empty_zscore_hist_source()
@@ -2017,6 +2298,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         rebalance_layout()
         refresh_plot_ranges()
         sync_optimization_cutoff_marker(test_started_at=None, test_ended_at=None)
+        sync_optimization_train_overlay(test_started_at=None, test_ended_at=None)
         set_equity_summary_overlay(None)
         sync_equity_legend(None, None)
         summary_div.text = message
@@ -2114,12 +2396,30 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             bollinger_k=float(_read_spinner_value(bollinger_input, 2.0)),
         )
 
+    def set_tester_context(
+        source_kind: str,
+        *,
+        oos_started_at: datetime | None = None,
+        context_started_at: datetime | None = None,
+        context_ended_at: datetime | None = None,
+    ) -> None:
+        nonlocal current_tester_context
+        current_tester_context = {
+            "source_kind": str(source_kind or "tester_manual"),
+            "oos_started_at": oos_started_at,
+            "context_started_at": context_started_at,
+            "context_ended_at": context_ended_at,
+        }
+
     def current_pair() -> PairSelection | None:
         if symbol_1_select.value == INSTRUMENT_PLACEHOLDER or symbol_2_select.value == INSTRUMENT_PLACEHOLDER:
             return None
         if symbol_1_select.value == symbol_2_select.value:
             return None
         return PairSelection(symbol_1=symbol_1_select.value, symbol_2=symbol_2_select.value)
+
+    def _context_datetime(value: object) -> datetime | None:
+        return value if isinstance(value, datetime) else None
 
     def _empty_scan_source_data() -> dict[str, list[object]]:
         return {key: [] for key in state.scan_source.data.keys()}
@@ -2675,6 +2975,14 @@ if (!targets.length) {
         if index < 0 or index >= len(trial_ids):
             return False, None, period
 
+        optimization_started_at = _coerce_datetime(optimization_period_slider.value[0])
+        optimization_ended_at = _coerce_datetime(optimization_period_slider.value[1])
+        set_tester_context(
+            "optimization_row",
+            oos_started_at=optimization_ended_at,
+            context_started_at=optimization_started_at,
+            context_ended_at=optimization_ended_at,
+        )
         lookback_input.value = int(data["lookback_bars"][index])
         entry_input.value = float(data["entry_z"][index])
         exit_input.value = float(data["exit_z"][index])
@@ -2741,6 +3049,7 @@ if (!targets.length) {
         tester_started_at = _coerce_datetime(period_slider.value[0])
         tester_ended_at = _coerce_datetime(period_slider.value[1])
         sync_optimization_cutoff_marker(test_started_at=tester_started_at, test_ended_at=tester_ended_at)
+        sync_optimization_train_overlay(test_started_at=tester_started_at, test_ended_at=tester_ended_at)
         current_signature = current_optimization_signature()
         if not optimization_outputs_present() or displayed_optimization_signature is None or current_signature is None:
             return
@@ -2819,20 +3128,35 @@ if (!targets.length) {
     def sync_wfa_selection_highlight() -> None:
         indices = list(wfa_table_source.selected.indices)
         if not indices:
+            wfa_train_window_box.visible = False
+            wfa_train_start_span.visible = False
             wfa_test_window_box.visible = False
             return
         index = indices[0]
         data = wfa_table_source.data
+        train_starts = data.get("train_started_at", [])
+        train_ends = data.get("train_ended_at", [])
         starts = data.get("test_started_at", [])
         ends = data.get("test_ended_at", [])
-        if index >= len(starts) or index >= len(ends):
+        if index >= len(train_starts) or index >= len(train_ends) or index >= len(starts) or index >= len(ends):
+            wfa_train_window_box.visible = False
+            wfa_train_start_span.visible = False
             wfa_test_window_box.visible = False
             return
+        train_started_at = train_starts[index]
+        train_ended_at = train_ends[index]
         started_at = starts[index]
         ended_at = ends[index]
-        if started_at is None or ended_at is None:
+        if train_started_at is None or train_ended_at is None or started_at is None or ended_at is None:
+            wfa_train_window_box.visible = False
+            wfa_train_start_span.visible = False
             wfa_test_window_box.visible = False
             return
+        wfa_train_window_box.left = train_started_at
+        wfa_train_window_box.right = train_ended_at
+        wfa_train_window_box.visible = True
+        wfa_train_start_span.location = train_started_at
+        wfa_train_start_span.visible = True
         wfa_test_window_box.left = started_at
         wfa_test_window_box.right = ended_at
         wfa_test_window_box.visible = True
@@ -2880,6 +3204,353 @@ if (!targets.length) {
         padding = max(1.0, (y_high - y_low) * 0.08)
         meta_equity_plot.y_range.start = y_low - padding
         meta_equity_plot.y_range.end = y_high + padding
+
+    def clear_portfolio_equity_outputs() -> None:
+        portfolio_equity_source.data = {"time": [], "equity": []}
+        portfolio_oos_cutoff_span.visible = False
+        portfolio_equity_plot.x_range.start = _datetime_to_bokeh_millis(history_start)
+        portfolio_equity_plot.x_range.end = _datetime_to_bokeh_millis(now_utc)
+        portfolio_equity_plot.y_range.start = 0.0
+        portfolio_equity_plot.y_range.end = 1.0
+
+    def clear_portfolio_analysis_outputs() -> None:
+        portfolio_weight_source.data = empty_portfolio_weight_data()
+        portfolio_correlation_source.data = empty_portfolio_correlation_data()
+        portfolio_analysis_div.text = (
+            "<p>Use <b>Analyze Portfolio</b> to calculate pairwise equity/return correlations and get "
+            "a diversification-weight suggestion. The second allocation mode, <b>diversified_risk</b>, "
+            "uses inverse return volatility penalized by mean absolute return correlation.</p>"
+        )
+
+    def refresh_portfolio_equity_ranges() -> None:
+        times = list(portfolio_equity_source.data.get("time", []))
+        equities = [float(value) for value in portfolio_equity_source.data.get("equity", [])]
+        if not times or not equities:
+            clear_portfolio_equity_outputs()
+            return
+        x_start = min(times)
+        x_end = max(times)
+        if x_start == x_end:
+            x_end = x_start + (datetime.resolution * 1000)
+        y_low = min(equities)
+        y_high = max(equities)
+        if abs(y_high - y_low) <= 1e-9:
+            y_high = y_low + 1.0
+        padding = max(1.0, (y_high - y_low) * 0.08)
+        portfolio_equity_plot.x_range.start = x_start
+        portfolio_equity_plot.x_range.end = x_end
+        portfolio_equity_plot.y_range.start = y_low - padding
+        portfolio_equity_plot.y_range.end = y_high + padding
+
+    def sync_portfolio_oos_cutoff_marker(oos_started_at: datetime | None) -> None:
+        if oos_started_at is None:
+            portfolio_oos_cutoff_span.visible = False
+            return
+        portfolio_oos_cutoff_span.location = oos_started_at
+        portfolio_oos_cutoff_span.visible = True
+
+    def run_portfolio_backtests(
+        items: list,
+        *,
+        started_at: datetime,
+        ended_at: datetime,
+        allocation_capitals_by_id: dict[str, float],
+    ) -> tuple[list[PortfolioCurve], dict[str, PortfolioRunRow], int, int]:
+        current_fee_mode = str(bybit_fee_mode_select.value or settings.bybit_tradfi_fee_mode)
+        curves: list[PortfolioCurve] = []
+        next_rows: dict[str, PortfolioRunRow] = {}
+        no_data_count = 0
+        excluded_count = 0
+        try:
+            for item in items:
+                allocation_capital = max(float(allocation_capitals_by_id.get(item.item_id, 0.0) or 0.0), 0.0)
+                if allocation_capital <= 0.0:
+                    excluded_count += 1
+                    next_rows[item.item_id] = PortfolioRunRow(
+                        item_id=item.item_id,
+                        symbol_1=item.symbol_1,
+                        symbol_2=item.symbol_2,
+                        timeframe=item.timeframe.value,
+                        allocation_capital=0.0,
+                        net_profit=None,
+                        ending_equity=None,
+                        max_drawdown=None,
+                        trades=None,
+                        status="excluded",
+                    )
+                    continue
+                os.environ["MT_SERVICE_BYBIT_TRADFI_FEE_MODE"] = str(item.fee_mode or current_fee_mode)
+                get_settings.cache_clear()
+                defaults = scale_defaults_for_portfolio_item(item, allocation_capital)
+                result = run_distance_backtest(
+                    broker=broker,
+                    pair=PairSelection(symbol_1=item.symbol_1, symbol_2=item.symbol_2),
+                    timeframe=item.timeframe,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    defaults=defaults,
+                    params=item.params(),
+                )
+                if result.frame.is_empty():
+                    no_data_count += 1
+                    curves.append(
+                        PortfolioCurve(
+                            item_id=item.item_id,
+                            symbol_1=item.symbol_1,
+                            symbol_2=item.symbol_2,
+                            timeframe=item.timeframe.value,
+                            initial_capital=defaults.initial_capital,
+                            times=[],
+                            equities=[],
+                        )
+                    )
+                    next_rows[item.item_id] = PortfolioRunRow(
+                        item_id=item.item_id,
+                        symbol_1=item.symbol_1,
+                        symbol_2=item.symbol_2,
+                        timeframe=item.timeframe.value,
+                        allocation_capital=defaults.initial_capital,
+                        net_profit=None,
+                        ending_equity=None,
+                        max_drawdown=None,
+                        trades=None,
+                        status="no_data",
+                    )
+                    continue
+                frame = result.frame
+                curves.append(
+                    PortfolioCurve(
+                        item_id=item.item_id,
+                        symbol_1=item.symbol_1,
+                        symbol_2=item.symbol_2,
+                        timeframe=item.timeframe.value,
+                        initial_capital=defaults.initial_capital,
+                        times=list(frame.get_column("time").to_list()),
+                        equities=[float(value) for value in frame.get_column("equity_total").to_list()],
+                    )
+                )
+                summary = result.summary
+                next_rows[item.item_id] = PortfolioRunRow(
+                    item_id=item.item_id,
+                    symbol_1=item.symbol_1,
+                    symbol_2=item.symbol_2,
+                    timeframe=item.timeframe.value,
+                    allocation_capital=defaults.initial_capital,
+                    net_profit=float(summary.get("net_pnl", 0.0) or 0.0),
+                    ending_equity=float(summary.get("ending_equity", defaults.initial_capital) or defaults.initial_capital),
+                    max_drawdown=float(summary.get("max_drawdown", 0.0) or 0.0),
+                    trades=int(summary.get("trades", 0) or 0),
+                    status="ok",
+                )
+        finally:
+            os.environ["MT_SERVICE_BYBIT_TRADFI_FEE_MODE"] = current_fee_mode
+            get_settings.cache_clear()
+        return curves, next_rows, no_data_count, excluded_count
+
+    def refresh_portfolio_analysis(
+        curves: list[PortfolioCurve],
+        *,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> list[PortfolioAllocationSuggestionRow]:
+        valid_curves = [curve for curve in curves if curve.times and curve.equities]
+        pairwise_rows, suggestion_rows = analyze_portfolio_curves(valid_curves)
+        portfolio_weight_source.data = portfolio_weight_rows_to_source(suggestion_rows)
+        portfolio_correlation_source.data = portfolio_correlation_rows_to_source(pairwise_rows)
+        if not suggestion_rows:
+            portfolio_analysis_div.text = (
+                f"<p>Portfolio analysis found no valid equity curves on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
+                f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            )
+            return []
+        portfolio_analysis_div.text = (
+            f"<p>Portfolio analysis finished on <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
+            f"`equity_corr` is Pearson correlation of normalized equity curves. `return_corr` is Pearson correlation of aligned equity returns. "
+            f"The recommended second allocation mode is <b>diversified_risk</b>: weight = "
+            f"<b>1 / (return volatility * (1 + mean |return correlation|))</b>, normalized to 100%.</p>"
+        )
+        return suggestion_rows
+
+    def refresh_portfolio_table(*, status_text: str | None = None) -> None:
+        nonlocal portfolio_run_rows_by_id
+        items = load_portfolio_items()
+        valid_ids = {item.item_id for item in items}
+        portfolio_run_rows_by_id = {item_id: row for item_id, row in portfolio_run_rows_by_id.items() if item_id in valid_ids}
+        portfolio_table_source.data = portfolio_items_to_source(items, portfolio_run_rows_by_id)
+        portfolio_table_source.selected.indices = []
+        if not items:
+            portfolio_run_rows_by_id = {}
+            clear_portfolio_equity_outputs()
+            clear_portfolio_analysis_outputs()
+            portfolio_status_div.text = status_text or "<p>Portfolio is empty. Use <b>В портфель</b> in the tester to save pairs and strategy parameters.</p>"
+            return
+        if status_text is not None:
+            portfolio_status_div.text = status_text
+
+    def on_add_to_portfolio() -> None:
+        pair = current_pair()
+        if pair is None:
+            portfolio_status_div.text = "<p>Choose two different valid instruments before saving to portfolio.</p>"
+            return
+        # Portfolio rows are always saved from the current tester state:
+        # current pair, timeframe, strategy params, defaults, and the latest
+        # tester context metadata (for example optimizer/meta-derived OOS info).
+        item = build_portfolio_item(
+            symbol_1=pair.symbol_1,
+            symbol_2=pair.symbol_2,
+            timeframe=Timeframe(timeframe_select.value),
+            params=build_distance_params(),
+            defaults=build_defaults(),
+            fee_mode=str(bybit_fee_mode_select.value or settings.bybit_tradfi_fee_mode),
+            source_kind=str(current_tester_context.get("source_kind") or "tester_manual"),
+            oos_started_at=_context_datetime(current_tester_context.get("oos_started_at")),
+            context_started_at=_context_datetime(current_tester_context.get("context_started_at")),
+            context_ended_at=_context_datetime(current_tester_context.get("context_ended_at")),
+        )
+        stored_item, created = upsert_portfolio_item(item)
+        clear_portfolio_analysis_outputs()
+        refresh_portfolio_table(
+            status_text=(
+                f"<p>{'Saved' if created else 'Updated'} portfolio item for <b>{stored_item.symbol_1}</b> / <b>{stored_item.symbol_2}</b> "
+                f"on <b>{stored_item.timeframe.value}</b>. Source: <b>{stored_item.source_kind}</b>.</p>"
+            )
+        )
+
+    def on_reload_portfolio() -> None:
+        clear_portfolio_analysis_outputs()
+        refresh_portfolio_table(status_text="<p>Reloaded portfolio CSV from disk.</p>")
+
+    def on_remove_selected_portfolio_items() -> None:
+        indices = list(portfolio_table_source.selected.indices)
+        if not indices:
+            portfolio_status_div.text = "<p>Select one or more portfolio rows to remove them.</p>"
+            return
+        item_ids = [str(portfolio_table_source.data["item_id"][index]) for index in indices]
+        removed = remove_portfolio_items(item_ids)
+        if removed <= 0:
+            portfolio_status_div.text = "<p>No portfolio rows were removed.</p>"
+            return
+        clear_portfolio_analysis_outputs()
+        refresh_portfolio_table(status_text=f"<p>Removed <b>{removed}</b> selected portfolio row(s).</p>")
+
+    def on_analyze_portfolio() -> None:
+        items = load_portfolio_items()
+        if not items:
+            clear_portfolio_analysis_outputs()
+            portfolio_analysis_div.text = "<p>Portfolio is empty. Save at least one tester pair first.</p>"
+            return
+        started_at = _coerce_datetime(portfolio_period_slider.value[0])
+        ended_at = _coerce_datetime(portfolio_period_slider.value[1])
+        if ended_at <= started_at:
+            portfolio_analysis_div.text = "<p>Portfolio Period is invalid. End must be after start.</p>"
+            return
+        total_capital = float(_read_spinner_value(capital_input, 10_000.0))
+        equal_allocation = total_capital / float(len(items))
+        provisional_allocation = {item.item_id: equal_allocation for item in items}
+        curves, _rows, no_data_count, excluded_count = run_portfolio_backtests(
+            items,
+            started_at=started_at,
+            ended_at=ended_at,
+            allocation_capitals_by_id=provisional_allocation,
+        )
+        suggestions = refresh_portfolio_analysis(curves, started_at=started_at, ended_at=ended_at)
+        portfolio_status_div.text = (
+            f"<p>Portfolio analysis finished for <b>{len(items)}</b> saved pair(s). "
+            f"Provisional equal allocation per pair: <b>{equal_allocation:.2f}</b>. "
+            f"Valid suggestion rows: <b>{len(suggestions)}</b>. Missing data rows: <b>{no_data_count}</b>. "
+            f"Excluded rows: <b>{excluded_count}</b>.</p>"
+        )
+
+    def on_run_portfolio() -> None:
+        nonlocal portfolio_run_rows_by_id
+        items = load_portfolio_items()
+        if not items:
+            portfolio_status_div.text = "<p>Portfolio is empty. Save at least one tester pair first.</p>"
+            clear_portfolio_equity_outputs()
+            clear_portfolio_analysis_outputs()
+            return
+        started_at = _coerce_datetime(portfolio_period_slider.value[0])
+        ended_at = _coerce_datetime(portfolio_period_slider.value[1])
+        if ended_at <= started_at:
+            portfolio_status_div.text = "<p>Portfolio Period is invalid. End must be after start.</p>"
+            return
+
+        total_capital = float(_read_spinner_value(capital_input, 10_000.0))
+        allocation_mode = str(portfolio_allocation_select.value or PORTFOLIO_ALLOCATION_OPTIONS[0])
+        equal_allocation = total_capital / float(len(items))
+        final_allocation_by_id = {item.item_id: equal_allocation for item in items}
+        final_mode_label = "equal_weight"
+        no_data_count = 0
+        excluded_count = 0
+
+        if allocation_mode == "diversified_risk":
+            provisional_curves, _rows, provisional_no_data_count, provisional_excluded_count = run_portfolio_backtests(
+                items,
+                started_at=started_at,
+                ended_at=ended_at,
+                allocation_capitals_by_id=final_allocation_by_id,
+            )
+            suggestion_rows = refresh_portfolio_analysis(provisional_curves, started_at=started_at, ended_at=ended_at)
+            if suggestion_rows:
+                final_allocation_by_id = {
+                    row.item_id: total_capital * float(row.suggested_weight)
+                    for row in suggestion_rows
+                }
+                final_mode_label = "diversified_risk"
+            else:
+                final_mode_label = "equal_weight (fallback)"
+            no_data_count = provisional_no_data_count
+            excluded_count = provisional_excluded_count
+
+        curves, next_rows, run_no_data_count, run_excluded_count = run_portfolio_backtests(
+            items,
+            started_at=started_at,
+            ended_at=ended_at,
+            allocation_capitals_by_id=final_allocation_by_id,
+        )
+        no_data_count = max(no_data_count, run_no_data_count)
+        excluded_count = max(excluded_count, run_excluded_count)
+        portfolio_run_rows_by_id = next_rows
+        if allocation_mode != "diversified_risk":
+            refresh_portfolio_analysis(curves, started_at=started_at, ended_at=ended_at)
+        combined = combine_portfolio_equity_curves(curves)
+        if combined.is_empty():
+            clear_portfolio_equity_outputs()
+            refresh_portfolio_table(
+                status_text=(
+                    f"<p>Portfolio run found no aligned data for <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
+                    f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+                )
+            )
+            return
+
+        portfolio_equity_source.data = {
+            "time": list(combined.get_column("time").to_list()),
+            "equity": [float(value) for value in combined.get_column("equity").to_list()],
+        }
+        refresh_portfolio_equity_ranges()
+        # The portfolio OOS marker represents the latest saved OOS start across
+        # all portfolio rows, because it is the strictest "fully out-of-sample"
+        # boundary shared by the whole saved basket.
+        latest_oos_started_at = latest_portfolio_oos_started_at(items)
+        if latest_oos_started_at is not None and started_at <= latest_oos_started_at <= ended_at:
+            sync_portfolio_oos_cutoff_marker(latest_oos_started_at)
+            latest_oos_label = f"{latest_oos_started_at:%Y-%m-%d}"
+        else:
+            sync_portfolio_oos_cutoff_marker(None)
+            latest_oos_label = "n/a"
+        refresh_portfolio_table(
+            status_text=(
+                f"<p>Portfolio run finished for <b>{len(items)}</b> saved pair(s) on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
+                f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. Total capital: <b>{total_capital:.2f}</b>, "
+                f"allocation mode: <b>{final_mode_label}</b>. Baseline equal slice: <b>{equal_allocation:.2f}</b>. "
+                f"Latest saved OOS start: <b>{latest_oos_label}</b>. Missing data rows: <b>{no_data_count}</b>. "
+                f"Excluded rows: <b>{excluded_count}</b>.</p>"
+            )
+        )
+
+    def on_portfolio_config_change(_attr: str, _old: object, _new: object) -> None:
+        clear_portfolio_analysis_outputs()
 
     def _coerce_meta_datetime(value: object) -> datetime | None:
         if value in (None, ""):
@@ -3125,6 +3796,8 @@ if (!targets.length) {
             wfa_table_source.selected.indices = []
             wfa_equity_source.data = {"time": [], "equity": []}
             wfa_outputs.visible = False
+            wfa_train_window_box.visible = False
+            wfa_train_start_span.visible = False
             wfa_test_window_box.visible = False
             refresh_wfa_equity_ranges()
             if show_message and wfa_body.visible:
@@ -3297,6 +3970,8 @@ if (!targets.length) {
         wfa_table_source.selected.indices = []
         wfa_equity_source.data = {"time": [], "equity": []}
         wfa_outputs.visible = False
+        wfa_train_window_box.visible = False
+        wfa_train_start_span.visible = False
         wfa_test_window_box.visible = False
         wfa_progress["completed"] = 0
         wfa_progress["total"] = 0
@@ -3526,6 +4201,14 @@ if (!targets.length) {
             stop_mode_select.value = "enabled"
             stop_input.value = float(raw_stop)
         bollinger_input.value = float(data["bollinger_k"][index])
+        selected_test_started_at = _coerce_meta_datetime(data["test_started_at"][index])
+        selected_test_ended_at = _coerce_meta_datetime(data["test_ended_at"][index])
+        set_tester_context(
+            "meta_selected_fold",
+            oos_started_at=selected_test_started_at,
+            context_started_at=selected_test_started_at,
+            context_ended_at=selected_test_ended_at,
+        )
         ran = apply_backtest_result(period_override=tester_period)
         if ran:
             meta_status_div.text = (
@@ -3558,6 +4241,13 @@ if (!targets.length) {
             stop_mode_select.value = "enabled"
             stop_input.value = float(raw_stop)
         bollinger_input.value = float(data["bollinger_k"][index])
+        current_meta_oos_started_at = read_meta_oos_started_at()
+        set_tester_context(
+            "meta_robustness_row",
+            oos_started_at=current_meta_oos_started_at,
+            context_started_at=current_meta_oos_started_at,
+            context_ended_at=None,
+        )
         ran = apply_backtest_result(period_override=tester_period)
         if ran:
             meta_status_div.text = (
@@ -3687,6 +4377,7 @@ if (!targets.length) {
         rebalance_layout()
         refresh_plot_ranges()
         sync_optimization_cutoff_marker(test_started_at=started_at, test_ended_at=ended_at)
+        sync_optimization_train_overlay(test_started_at=started_at, test_ended_at=ended_at)
 
         summary = result.summary
         sync_equity_legend(str(summary['symbol_1']), str(summary['symbol_2']))
@@ -3864,6 +4555,7 @@ if (!targets.length) {
         symbol_2_select.options = options
         symbol_1_select.value = symbol_1
         symbol_2_select.value = symbol_2
+        set_tester_context("scan_row", context_started_at=tester_period[0], context_ended_at=tester_period[1])
         ran = apply_backtest_result(period_override=tester_period)
         if ran:
             scan_status_div.text = (
@@ -3875,6 +4567,9 @@ if (!targets.length) {
             scan_status_div.text = f"<p>Pair copied from cointegration scan: <b>{symbol_1}</b> / <b>{symbol_2}</b>. Test did not run because aligned data is missing.</p>"
 
     def on_run_test() -> None:
+        tester_started_at = _coerce_datetime(period_slider.value[0])
+        tester_ended_at = _coerce_datetime(period_slider.value[1])
+        set_tester_context("tester_manual", context_started_at=tester_started_at, context_ended_at=tester_ended_at)
         try:
             apply_backtest_result()
         except Exception as exc:  # pragma: no cover - runtime UI path
@@ -4509,6 +5204,8 @@ if (!targets.length) {
         download_group_select.value = GROUP_OPTIONS[0]
         download_policy_select.value = DOWNLOAD_POLICY_OPTIONS[0]
         download_period_slider.value = (_ui_datetime(history_start), _ui_datetime(now_utc))
+        portfolio_period_slider.value = (_ui_datetime(history_start), _ui_datetime(now_utc))
+        portfolio_allocation_select.value = PORTFOLIO_ALLOCATION_OPTIONS[0]
 
         for _key, _plot, _source, _columns, body, toggle in plot_bindings:
             set_section_visibility(_key, body, toggle, True)
@@ -4528,6 +5225,7 @@ if (!targets.length) {
         reset_meta_button()
         reset_scan_button()
         reset_download_button()
+        refresh_portfolio_table()
         apply_plot_display_settings()
         rebalance_layout()
         refresh_plot_ranges()
@@ -4613,6 +5311,8 @@ if (!targets.length) {
     wfa_unit_select.on_change("value", on_wfa_config_change)
     wfa_lookback_input.on_change("value", on_wfa_config_change)
     wfa_test_input.on_change("value", on_wfa_config_change)
+    portfolio_period_slider.on_change("value", on_portfolio_config_change)
+    portfolio_allocation_select.on_change("value", on_portfolio_config_change)
     for display_widget in [plot_font_size_input, plot_height_single_input, plot_height_two_input, plot_height_three_input, plot_height_four_input]:
         display_widget.on_change("value", on_display_settings_change)
         if "value_throttled" in display_widget.properties():
@@ -4631,6 +5331,7 @@ if (!targets.length) {
     download_status_div.on_change("text", build_service_log_handler("downloader"))
     wfa_status_div.on_change("text", build_service_log_handler("wfa"))
     meta_status_div.on_change("text", build_service_log_handler("meta_selector"))
+    portfolio_status_div.on_change("text", build_service_log_handler("portfolio"))
     state.shared_x_range.on_change("start", on_range_change)
     state.shared_x_range.on_change("end", on_range_change)
     state.trades_source.selected.on_change("indices", on_trade_selection)
@@ -4640,11 +5341,16 @@ if (!targets.length) {
     state.optimization_source.selected.on_change("indices", on_optimization_selection)
     state.scan_source.selected.on_change("indices", on_scan_selection)
     run_button.on_click(on_run_test)
+    add_to_portfolio_button.on_click(on_add_to_portfolio)
     optimization_run_button.on_click(on_run_optimization)
     scan_run_button.on_click(on_run_scan)
     download_run_button.on_click(on_run_download)
     wfa_run_button.on_click(on_run_wfa)
     meta_run_button.on_click(on_run_meta)
+    portfolio_run_button.on_click(on_run_portfolio)
+    portfolio_analyze_button.on_click(on_analyze_portfolio)
+    portfolio_reload_button.on_click(on_reload_portfolio)
+    portfolio_remove_button.on_click(on_remove_selected_portfolio_items)
 
     top_toggle_bar = row(
         price_1_toggle,
@@ -4654,6 +5360,7 @@ if (!targets.length) {
         equity_toggle,
         trades_toggle,
         zscore_metrics_toggle,
+        portfolio_toggle,
         optimization_toggle,
         display_toggle,
         wfa_toggle,
@@ -4670,6 +5377,7 @@ if (!targets.length) {
         spread_section,
         zscore_section,
         equity_section,
+        portfolio_block,
         trades_block,
         zscore_metrics_block,
         optimization_block,
@@ -4708,6 +5416,8 @@ if (!targets.length) {
     append_service_log("downloader", download_status_div.text)
     append_service_log("wfa", wfa_status_div.text)
     append_service_log("meta_selector", meta_status_div.text)
+    append_service_log("portfolio", portfolio_status_div.text)
+    refresh_portfolio_table()
     restore_saved_wfa_result(show_message=False)
     restore_saved_meta_result(show_message=False)
     ensure_nonempty_layout()

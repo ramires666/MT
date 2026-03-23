@@ -21,8 +21,12 @@
 - Switching the algorithm updates the parameter controls shown in the sidebar and notifies the optimizer block to refresh its search space; `session_state["selected_algorithm"]` tracks the choice.
 - Chart visibility toggles reorganize the chart stack by rewriting `layout.children` so charts maintain their shared x_range without re-rendering the entire document.
 - Button clicks (Run Test, Start Optimization, Johansen Scan) enqueue the respective jobs via the API; the frontend polls for updates and patches ColumnDataSources when results arrive.
+- The tester exposes a `В портфель` action that saves the current tester pair, timeframe, strategy parameters, defaults, fee mode, and replay context metadata into `data/portfolio/portfolio_items.csv`.
 - The WFA block exposes an anchored/rolling mode toggle plus row controls for Train, Validation, Test window lengths and step size. Launching WFA from the tester menu or optimizer table copies the selected pair(s) and relevant algorithm parameters into the WFA form, preserving the tester period. A "Run WFA" button triggers the background job and streams chunked updates into `wfa_chunk_source`.
 - WFA rows are clickable: selecting one copies that window back into the tester controls without changing the base test period and highlights the associated span on all charts. Clicking a chart marker can highlight matching WFA rows via shared timestamps.
+- The `Portfolio` block has its own `Portfolio Period`, a saved-rows table, an `Analyze Portfolio` action, and a combined equity chart. `Run Portfolio` replays every saved row on that portfolio period, supports `equal_weight` plus a second `diversified_risk` allocation mode, and sums the resulting equity curves.
+- `Analyze Portfolio` must compute pairwise normalized equity correlation, aligned equity-return correlation, and a suggested allocation table. The recommended second allocation mode is `diversified_risk`: `weight_i ∝ 1 / (return_volatility_i * (1 + mean_abs_return_correlation_i))`.
+- The portfolio equity chart must show a dashed OOS marker at the latest saved `oos_started_at` across all portfolio rows, because that is the first timestamp where the entire saved basket is fully out-of-sample.
 
 **Synced x-range and auto y-range strategy**
 - All figures share the same x_range object; attach a `.js_on_change("bounds")` listener that schedules a Python callback to recompute each visible figure's y_range to the min/max of the subset currently in view.
@@ -41,6 +45,7 @@
 - Every visible DataTable block should expose a one-click `Save XLSX` action next to the table.
 - Table export filenames must include the block name, `Symbol 1`, `Symbol 2`, timeframe, and a UTC timestamp, and save into `docs/tables`.
 - Exported workbooks must place reproduction metadata above the table body: pair, timeframe, relevant period, and all block-specific parameters needed to rerun the same test/optimizer/WFA/meta configuration.
+- `Portfolio` storage is intentionally CSV-first for now: the table is the source of truth, the backtest run is ephemeral, and rerunning `Portfolio` on a new portfolio period must not mutate the saved rows themselves.
 
 **Tester vs Optimizer Date Contract**
 - `Test Period` belongs to the main tester and controls all chart/trade replays from the sidebar and from optimizer-row replay.

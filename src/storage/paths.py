@@ -31,3 +31,7 @@ def wfa_root() -> Path:
 
 def meta_selector_root() -> Path:
     return get_settings().data_root / "meta_selector"
+
+
+def portfolio_root() -> Path:
+    return get_settings().data_root / "portfolio"
