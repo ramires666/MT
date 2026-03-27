@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 
 from domain.contracts import NormalizedGroup, ScanUniverseMode, Timeframe, UnitRootGate
+from domain.data.catalog_groups import filter_catalog_by_group
 from domain.data.io import load_instrument_catalog_frame, load_quotes_range
 from domain.scan.johansen_core import scan_pair_payload, sort_rows
 from domain.scan.johansen_models import (
@@ -69,7 +70,7 @@ def resolve_scan_symbols(
     if universe_mode is ScanUniverseMode.GROUP:
         group_value = normalize_group_value(normalized_group)
         if group_value:
-            catalog = catalog.filter(pl.col("normalized_group") == group_value)
+            catalog = filter_catalog_by_group(catalog, group_value)
 
     if catalog.is_empty():
         return []

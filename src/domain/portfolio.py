@@ -56,6 +56,16 @@ class PortfolioAllocationSuggestionRow:
     suggested_weight: float
 
 
+_CONTEXTUAL_PORTFOLIO_SOURCE_KINDS = frozenset(
+    {
+        "optimization_row",
+        "meta_selected_fold",
+        "meta_robustness_row",
+        "scan_row",
+    }
+)
+
+
 def scale_defaults_for_portfolio_item(item: PortfolioItem, allocation_capital: float) -> StrategyDefaults:
     saved_capital = max(float(item.initial_capital), 1e-9)
     scale = float(allocation_capital) / saved_capital
@@ -67,11 +77,57 @@ def scale_defaults_for_portfolio_item(item: PortfolioItem, allocation_capital: f
     )
 
 
+def portfolio_strategy_started_at(item: PortfolioItem, *, started_at: datetime, ended_at: datetime) -> datetime:
+    context_started_at = item.context_started_at
+    if item.source_kind not in _CONTEXTUAL_PORTFOLIO_SOURCE_KINDS or context_started_at is None:
+        return started_at
+    if started_at < context_started_at < ended_at:
+        return context_started_at
+    return started_at
+
+
+def prepend_flat_equity_prefix(
+    times: list[datetime],
+    equities: list[float],
+    *,
+    period_started_at: datetime,
+    strategy_started_at: datetime,
+    initial_capital: float,
+) -> tuple[list[datetime], list[float]]:
+    if not times or strategy_started_at <= period_started_at:
+        return times, equities
+
+    prefixed_times = list(times)
+    prefixed_equities = list(equities)
+    if prefixed_times[0] > strategy_started_at:
+        prefixed_times.insert(0, strategy_started_at)
+        prefixed_equities.insert(0, float(initial_capital))
+    prefixed_times.insert(0, period_started_at)
+    prefixed_equities.insert(0, float(initial_capital))
+    return prefixed_times, prefixed_equities
+
+
 def latest_portfolio_oos_started_at(items: list[PortfolioItem]) -> datetime | None:
     candidates = [item.oos_started_at for item in items if item.oos_started_at is not None]
     if not candidates:
         return None
     return max(candidates)
+
+
+def materialize_portfolio_backtest_allocations(
+    item_ids: list[str],
+    *,
+    allocation_capitals_by_id: dict[str, float],
+    fallback_allocation_capital: float,
+) -> dict[str, float]:
+    fallback = max(float(fallback_allocation_capital or 0.0), 0.0)
+    materialized: dict[str, float] = {}
+    for item_id in item_ids:
+        allocation = max(float(allocation_capitals_by_id.get(item_id, 0.0) or 0.0), 0.0)
+        if allocation <= 0.0:
+            allocation = fallback
+        materialized[item_id] = allocation
+    return materialized
 
 
 def _curve_label(curve: PortfolioCurve) -> str:
@@ -185,7 +241,12 @@ def analyze_portfolio_curves(
 
 def combine_portfolio_equity_curves(
     curves: list[PortfolioCurve],
+    *,
+    included_item_ids: set[str] | None = None,
+    allocation_capitals_by_id: dict[str, float] | None = None,
 ) -> pl.DataFrame:
+    if included_item_ids is not None:
+        curves = [curve for curve in curves if curve.item_id in included_item_ids]
     if not curves:
         return pl.DataFrame({"time": [], "equity": []}, schema={"time": pl.Datetime(time_zone="UTC"), "equity": pl.Float64})
 
@@ -194,13 +255,24 @@ def combine_portfolio_equity_curves(
         return pl.DataFrame({"time": [], "equity": []}, schema={"time": pl.Datetime(time_zone="UTC"), "equity": pl.Float64})
 
     indices = [0 for _ in curves]
-    current_equities = [float(curve.initial_capital) for curve in curves]
+    effective_capitals = [
+        max(
+            float(allocation_capitals_by_id.get(curve.item_id, curve.initial_capital) or curve.initial_capital),
+            0.0,
+        )
+        if allocation_capitals_by_id is not None
+        else float(curve.initial_capital)
+        for curve in curves
+    ]
+    current_equities = list(effective_capitals)
     totals: list[float] = []
     for moment in all_times:
         total = 0.0
         for curve_index, curve in enumerate(curves):
             while indices[curve_index] < len(curve.times) and curve.times[indices[curve_index]] <= moment:
-                current_equities[curve_index] = float(curve.equities[indices[curve_index]])
+                raw_initial_capital = max(float(curve.initial_capital), 1e-9)
+                raw_equity = float(curve.equities[indices[curve_index]])
+                current_equities[curve_index] = effective_capitals[curve_index] * (raw_equity / raw_initial_capital)
                 indices[curve_index] += 1
             total += current_equities[curve_index]
         totals.append(total)

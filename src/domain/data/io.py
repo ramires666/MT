@@ -17,6 +17,7 @@ from storage.paths import derived_quotes_root, raw_quotes_root
 SPEC_DEFAULTS: dict[str, Any] = {
     "symbol": "",
     "path": "",
+    "mt5_group_path": "",
     "description": "",
     "normalized_group": "custom",
     "digits": 0,

@@ -142,6 +142,12 @@ Then open:
 http://127.0.0.1:5006/bokeh_app
 ```
 
+There is also a WSL helper:
+
+```bash
+./start_bokeh_wsl.sh
+```
+
 On Windows there is also a helper:
 
 ```bat

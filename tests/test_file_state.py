@@ -146,18 +146,43 @@ def test_file_state_persist_swallows_write_os_errors(monkeypatch) -> None:
             state_path.unlink()
 
 
-def test_file_state_restore_skips_fractional_spinner_values() -> None:
+def test_file_state_restores_fractional_spinner_values() -> None:
     state_path = Path('tests/.tmp_bokeh_file_state_fractional_low.json')
     if state_path.exists():
         state_path.unlink()
     try:
-        state_path.write_text('{"opt_entry_start": 0}', encoding='utf-8')
-        spinner = Spinner(value=1.5, low=0.1, step=0.1)
-        controller = FileStateController(state_path, [BrowserStateBinding('opt_entry_start', spinner)])
+        state_path.write_text('{"opt_entry_start": 1.0999999999999996, "opt_exit_start": -3.6000000000000002}', encoding='utf-8')
+        entry_spinner = Spinner(value=1.5, low=0.1, step=0.1)
+        exit_spinner = Spinner(value=0.3, low=-5.0, step=0.1)
+        controller = FileStateController(
+            state_path,
+            [
+                BrowserStateBinding('opt_entry_start', entry_spinner),
+                BrowserStateBinding('opt_exit_start', exit_spinner),
+            ],
+        )
 
         controller.restore()
 
-        assert float(spinner.value) == 1.5
+        assert float(entry_spinner.value) == 1.1
+        assert float(exit_spinner.value) == -3.6
+    finally:
+        if state_path.exists():
+            state_path.unlink()
+
+
+def test_file_state_persist_normalizes_fractional_spinner_values() -> None:
+    state_path = Path('tests/.tmp_bokeh_file_state_fractional_persist.json')
+    if state_path.exists():
+        state_path.unlink()
+    try:
+        spinner = Spinner(value=1.0999999999999996, low=0.1, step=0.1)
+        controller = FileStateController(state_path, [BrowserStateBinding('opt_entry_start', spinner)])
+
+        controller.persist()
+
+        payload = file_state_module._read_json(state_path)
+        assert payload['opt_entry_start'] == 1.1
     finally:
         if state_path.exists():
             state_path.unlink()

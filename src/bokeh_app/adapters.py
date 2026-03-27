@@ -4,6 +4,8 @@ from bisect import bisect_left
 from datetime import datetime
 from typing import Any
 
+import polars as pl
+
 from domain.backtest.distance import DistanceBacktestResult
 from domain.optimizer.distance import DistanceOptimizationResult
 from domain.scan.johansen import JohansenUniverseScanResult
@@ -207,6 +209,123 @@ def result_to_sources(result: DistanceBacktestResult) -> dict[str, dict[str, lis
         "segments_1": segments_1,
         "segments_2": segments_2,
     }
+
+
+def result_to_padded_sources(
+    result: DistanceBacktestResult,
+    display_frame: pl.DataFrame,
+    *,
+    initial_capital: float,
+) -> dict[str, dict[str, list[Any]]]:
+    if display_frame.is_empty():
+        return result_to_sources(result)
+
+    slice_sources = result_to_sources(result)
+    times = display_frame.get_column("time").to_list()
+    x_values = [float(index) for index in range(len(times))]
+    price_1 = display_frame.get_column("close_1").to_list()
+    price_2 = display_frame.get_column("close_2").to_list()
+    full_index_by_time = {moment: index for index, moment in enumerate(times)}
+    nan_values = [float("nan")] * len(times)
+
+    sources = {
+        "price_1": {"x": list(x_values), "time": list(times), "price": list(price_1)},
+        "price_2": {"x": list(x_values), "time": list(times), "price": list(price_2)},
+        "spread": {"x": list(x_values), "time": list(times), "spread": list(nan_values)},
+        "zscore": {
+            "x": list(x_values),
+            "time": list(times),
+            "zscore": list(nan_values),
+            "upper": list(nan_values),
+            "lower": list(nan_values),
+        },
+        "equity": {
+            "x": list(x_values),
+            "time": list(times),
+            "total": [float(initial_capital)] * len(times),
+            "leg1": [float(initial_capital)] * len(times),
+            "leg2": [float(initial_capital)] * len(times),
+            "drawdown": [0.0] * len(times),
+            "drawdown_top": [0.0] * len(times),
+            "drawdown_width": [0.82] * len(times),
+        },
+        "trades": {key: [] for key in slice_sources["trades"].keys()},
+        "markers_1": {key: [] for key in slice_sources["markers_1"].keys()},
+        "markers_2": {key: [] for key in slice_sources["markers_2"].keys()},
+        "segments_1": {key: [] for key in slice_sources["segments_1"].keys()},
+        "segments_2": {key: [] for key in slice_sources["segments_2"].keys()},
+    }
+
+    slice_times = slice_sources["price_1"]["time"]
+    for slice_index, moment in enumerate(slice_times):
+        full_index = full_index_by_time.get(moment)
+        if full_index is None:
+            full_index = int(_lookup_bar_x(times, moment))
+        sources["spread"]["spread"][full_index] = slice_sources["spread"]["spread"][slice_index]
+        sources["zscore"]["zscore"][full_index] = slice_sources["zscore"]["zscore"][slice_index]
+        sources["zscore"]["upper"][full_index] = slice_sources["zscore"]["upper"][slice_index]
+        sources["zscore"]["lower"][full_index] = slice_sources["zscore"]["lower"][slice_index]
+        sources["equity"]["total"][full_index] = float(slice_sources["equity"]["total"][slice_index])
+        sources["equity"]["leg1"][full_index] = float(slice_sources["equity"]["leg1"][slice_index])
+        sources["equity"]["leg2"][full_index] = float(slice_sources["equity"]["leg2"][slice_index])
+
+    running_peak = float("-inf")
+    drawdown: list[float] = []
+    for value in sources["equity"]["total"]:
+        running_peak = max(running_peak, float(value))
+        drawdown.append(float(value) - running_peak)
+    sources["equity"]["drawdown"] = drawdown
+
+    trade_count = len(slice_sources["trades"]["trade_id"])
+    for trade_index in range(trade_count):
+        entry_time = slice_sources["trades"]["entry_time"][trade_index]
+        exit_time = slice_sources["trades"]["exit_time"][trade_index]
+        entry_x = float(full_index_by_time.get(entry_time, int(_lookup_bar_x(times, entry_time))))
+        exit_x = float(full_index_by_time.get(exit_time, int(_lookup_bar_x(times, exit_time))))
+        for key, values in slice_sources["trades"].items():
+            if key == "entry_x":
+                sources["trades"][key].append(entry_x)
+            elif key == "exit_x":
+                sources["trades"][key].append(exit_x)
+            else:
+                sources["trades"][key].append(values[trade_index])
+
+    marker_count_1 = len(slice_sources["markers_1"]["time"])
+    for marker_index in range(marker_count_1):
+        moment = slice_sources["markers_1"]["time"][marker_index]
+        marker_x = float(full_index_by_time.get(moment, int(_lookup_bar_x(times, moment))))
+        for key, values in slice_sources["markers_1"].items():
+            if key == "x":
+                sources["markers_1"][key].append(marker_x)
+            else:
+                sources["markers_1"][key].append(values[marker_index])
+
+    marker_count_2 = len(slice_sources["markers_2"]["time"])
+    for marker_index in range(marker_count_2):
+        moment = slice_sources["markers_2"]["time"][marker_index]
+        marker_x = float(full_index_by_time.get(moment, int(_lookup_bar_x(times, moment))))
+        for key, values in slice_sources["markers_2"].items():
+            if key == "x":
+                sources["markers_2"][key].append(marker_x)
+            else:
+                sources["markers_2"][key].append(values[marker_index])
+
+    segment_count = len(slice_sources["segments_1"]["x0"])
+    for trade_index in range(segment_count):
+        entry_time = slice_sources["trades"]["entry_time"][trade_index]
+        exit_time = slice_sources["trades"]["exit_time"][trade_index]
+        entry_x = float(full_index_by_time.get(entry_time, int(_lookup_bar_x(times, entry_time))))
+        exit_x = float(full_index_by_time.get(exit_time, int(_lookup_bar_x(times, exit_time))))
+        sources["segments_1"]["x0"].append(entry_x)
+        sources["segments_1"]["y0"].append(slice_sources["segments_1"]["y0"][trade_index])
+        sources["segments_1"]["x1"].append(exit_x)
+        sources["segments_1"]["y1"].append(slice_sources["segments_1"]["y1"][trade_index])
+        sources["segments_2"]["x0"].append(entry_x)
+        sources["segments_2"]["y0"].append(slice_sources["segments_2"]["y0"][trade_index])
+        sources["segments_2"]["x1"].append(exit_x)
+        sources["segments_2"]["y1"].append(slice_sources["segments_2"]["y1"][trade_index])
+
+    return sources
 
 def _blend_channel(start: int, end: int, ratio: float) -> int:
     return int(round(start + (end - start) * ratio))

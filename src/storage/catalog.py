@@ -4,6 +4,7 @@ from pathlib import Path
 
 import polars as pl
 
+from domain.data.catalog_groups import MT5_GROUP_COLUMN, mt5_group_path
 from mt5_gateway.models import InstrumentInfo
 from storage.paths import catalog_root
 
@@ -11,6 +12,7 @@ from storage.paths import catalog_root
 CATALOG_COLUMNS: list[tuple[str, object]] = [
     ("symbol", pl.String),
     ("path", pl.String),
+    (MT5_GROUP_COLUMN, pl.String),
     ("description", pl.String),
     ("normalized_group", pl.String),
     ("digits", pl.Int64),
@@ -54,6 +56,15 @@ def _normalize_catalog(frame: pl.DataFrame) -> pl.DataFrame:
     if frame.is_empty() and not frame.columns:
         return _empty_catalog_frame()
 
+    if MT5_GROUP_COLUMN not in frame.columns and "path" in frame.columns:
+        frame = frame.with_columns(
+            pl.Series(
+                MT5_GROUP_COLUMN,
+                [mt5_group_path(value) for value in frame.get_column("path").to_list()],
+                dtype=pl.String,
+            )
+        )
+
     for column, dtype in CATALOG_COLUMNS:
         if column not in frame.columns:
             default_value = "" if dtype == pl.String else 0
@@ -68,6 +79,7 @@ def write_instrument_catalog(instruments: list[InstrumentInfo], broker: str) -> 
         {
             "symbol": [item.symbol for item in instruments],
             "path": [item.path for item in instruments],
+            MT5_GROUP_COLUMN: [mt5_group_path(item.path) for item in instruments],
             "description": [item.description for item in instruments],
             "normalized_group": [item.normalized_group.value for item in instruments],
             "digits": [item.digits for item in instruments],

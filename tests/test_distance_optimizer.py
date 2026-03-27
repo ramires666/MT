@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import polars as pl
 
 import domain.optimizer.distance as distance_module
+from domain.backtest.distance import DistanceParameters, run_distance_backtest_frame
 from domain.contracts import PairSelection, StrategyDefaults
 from domain.optimizer import (
     count_distance_parameter_grid,
@@ -144,6 +145,54 @@ def test_distance_grid_search_frame_returns_sorted_rows() -> None:
     assert objective_scores == sorted(objective_scores, reverse=True)
     assert {row.lookback_bars for row in result.rows} == {3, 4}
     assert {row.entry_z for row in result.rows} == {1.0, 1.5}
+
+
+def test_distance_grid_best_row_matches_backtest_on_same_frame() -> None:
+    frame = _sample_pair_frame()
+    pair = PairSelection(symbol_1="US2000", symbol_2="NAS100")
+    defaults = StrategyDefaults()
+    result = optimize_distance_grid_frame(
+        frame=frame,
+        pair=pair,
+        defaults=defaults,
+        search_space=parse_distance_search_space(
+            {
+                "lookback_bars": [3, 4],
+                "entry_z": [1.0, 1.5],
+                "exit_z": [0.2],
+                "stop_z": [None],
+                "bollinger_k": [2.0],
+            }
+        ),
+        objective_metric="net_profit",
+        point_1=0.01,
+        point_2=0.01,
+        contract_size_1=1.0,
+        contract_size_2=1.0,
+    )
+
+    best = result.rows[0]
+    replay = run_distance_backtest_frame(
+        frame=frame,
+        pair=pair,
+        defaults=defaults,
+        params=DistanceParameters(
+            lookback_bars=best.lookback_bars,
+            entry_z=best.entry_z,
+            exit_z=best.exit_z,
+            stop_z=best.stop_z,
+            bollinger_k=best.bollinger_k,
+        ),
+        point_1=0.01,
+        point_2=0.01,
+        contract_size_1=1.0,
+        contract_size_2=1.0,
+    )
+
+    assert round(float(replay.summary["net_pnl"]), 8) == round(float(best.net_profit), 8)
+    assert round(float(replay.summary["ending_equity"]), 8) == round(float(best.ending_equity), 8)
+    assert round(abs(float(replay.summary["max_drawdown"])), 8) == round(float(best.max_drawdown), 8)
+    assert int(replay.summary["trades"]) == int(best.trades)
 
 
 def test_distance_grid_search_frame_supports_disabled_stop() -> None:

@@ -44,19 +44,31 @@ from bokeh.plotting import curdoc, figure
 from bokeh.transform import factor_cmap
 
 from app_config import get_settings
-from bokeh_app.adapters import empty_backtest_sources, optimization_results_to_source, result_to_sources, scan_results_to_source
+from bokeh_app.adapters import (
+    empty_backtest_sources,
+    optimization_results_to_source,
+    result_to_padded_sources,
+    result_to_sources,
+    scan_results_to_source,
+)
 from bokeh_app.browser_state import BrowserStateBinding
 from bokeh_app.file_state import FileStateController
 from bokeh_app.numeric_inputs import normalize_fractional_value
 from bokeh_app.state import AppState
 from bokeh_app.table_export import export_table_to_xlsx, metadata_rows_from_mapping
-from bokeh_app.view_utils import compute_plot_height, compute_series_bounds
+from bokeh_app.view_utils import (
+    compute_overlay_label_layout,
+    compute_plot_height,
+    compute_relative_plot_height,
+    compute_series_bounds,
+    display_symbol_label,
+)
 from bokeh_app.zscore_diagnostics import (
     build_zscore_diagnostics,
     empty_zscore_hist_source,
     empty_zscore_metric_source,
 )
-from domain.backtest.distance import DistanceParameters, run_distance_backtest
+from domain.backtest.distance import DistanceParameters, load_pair_frame, run_distance_backtest
 from domain.contracts import (
     OptimizationMode,
     PairSelection,
@@ -72,6 +84,7 @@ from domain.data.co_movers import (
     co_mover_group_labels_for_symbol,
     co_mover_symbols_for_symbol,
 )
+from domain.data.catalog_groups import ALL_GROUP_OPTION, filter_catalog_by_group, list_mt5_group_options
 from domain.data.io import load_instrument_catalog_frame
 from domain.optimizer import DistanceOptimizationResult, OBJECTIVE_METRICS, count_distance_parameter_grid, optimize_distance_genetic, optimize_distance_grid
 from domain.scan.johansen import JohansenScanParameters, JohansenUniverseScanResult, scan_universe_johansen
@@ -87,6 +100,9 @@ from domain.portfolio import (
     analyze_portfolio_curves,
     combine_portfolio_equity_curves,
     latest_portfolio_oos_started_at,
+    materialize_portfolio_backtest_allocations,
+    portfolio_strategy_started_at,
+    prepend_flat_equity_prefix,
     scale_defaults_for_portfolio_item,
 )
 from storage.paths import ui_state_path
@@ -102,7 +118,7 @@ from storage.scan_results import (
 from storage.wfa_results import load_wfa_run_snapshot
 
 INSTRUMENT_PLACEHOLDER = "-- refresh from MT5 --"
-GROUP_OPTIONS = ["all", "forex", "indices", "stocks", "commodities", "crypto", "custom"]
+GROUP_OPTIONS = [ALL_GROUP_OPTION]
 TIMEFRAME_OPTIONS = [item.value for item in Timeframe]
 UNIT_ROOT_TEST_OPTIONS = [item.value for item in UnitRootTest]
 SCAN_UNIVERSE_OPTIONS = list(GROUP_OPTIONS)
@@ -234,8 +250,13 @@ def build_document() -> None:
     shared_range = Range1d(start=0, end=1)
     state = AppState(shared_x_range=shared_range)
     doc = curdoc()
+    tester_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="distance-tester")
+    tester_future: Future[dict[str, object]] | None = None
+    tester_poll_callback: object | None = None
     optimization_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="distance-optimizer")
-    optimization_future: Future[tuple[DistanceOptimizationResult, str, PairSelection, dict[str, object]]] | None = None
+    optimization_future: Future[
+        tuple[DistanceOptimizationResult, dict[str, list[object]], str, PairSelection, dict[str, object]]
+    ] | None = None
     optimization_poll_callback: object | None = None
     optimization_cancel_event = Event()
     optimizer_parallel_workers = max(1, int(settings.optimizer_parallel_workers))
@@ -244,6 +265,10 @@ def build_document() -> None:
     displayed_optimization_signature: dict[str, object] | None = None
     optimization_summary_html = ""
     suppress_optimization_selection = False
+    suppress_optimization_config_change = False
+    suppress_shared_range_change = False
+    suppress_portfolio_range_change = False
+    suppress_symbol_change_refresh = 0
     scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="johansen-scan")
     scan_future: Future[JohansenUniverseScanResult] | None = None
     scan_poll_callback: object | None = None
@@ -264,6 +289,11 @@ def build_document() -> None:
     meta_poll_callback: object | None = None
     displayed_meta_signature: dict[str, object] | None = None
     portfolio_run_rows_by_id: dict[str, PortfolioRunRow] = {}
+    portfolio_curves_by_id: dict[str, PortfolioCurve] = {}
+    portfolio_curve_sources_by_id: dict[str, dict[str, list[object]]] = {}
+    portfolio_items_by_id: dict[str, object] = {}
+    portfolio_excluded_item_ids: set[str] = set()
+    portfolio_preview_item_id: str | None = None
     current_tester_context: dict[str, object] = {
         "source_kind": "tester_manual",
         "oos_started_at": None,
@@ -462,6 +492,16 @@ def build_document() -> None:
     price_2.segment("x0", "y0", "x1", "y1", source=state.trade_segments_2, line_color="#f59e0b", line_width=2)
     price_2.segment("x0", "y0", "x1", "y1", source=state.selected_trade_segments_2, line_color="#111827", line_width=4, line_alpha=0.9)
     price_2.scatter("x", "price", source=state.selected_trade_markers_2, size=12, marker="diamond", color="#111827", line_color="#f8fafc", line_width=1.2)
+
+    def sync_price_plot_labels() -> None:
+        label_1 = display_symbol_label(symbol_1_select.value, fallback="Price 1", placeholder=INSTRUMENT_PLACEHOLDER)
+        label_2 = display_symbol_label(symbol_2_select.value, fallback="Price 2", placeholder=INSTRUMENT_PLACEHOLDER)
+        price_1.title.text = label_1
+        price_2.title.text = label_2
+        price_1.yaxis.axis_label = label_1
+        price_2.yaxis.axis_label = label_2
+
+    sync_price_plot_labels()
 
     spread_plot = _build_figure("Spread / Residual", state.shared_x_range, "Spread", 360)
     spread_plot.line("x", "spread", source=state.spread_source, line_width=2, color="#6366f1")
@@ -692,7 +732,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         value=GROUP_OPTIONS[0],
         options=SCAN_UNIVERSE_OPTIONS,
         width=150,
-        description="Choose which universe to scan or browse: all symbols or one normalized tester group.",
+        description="Choose which universe to scan or browse: all symbols or one MT5 catalog group.",
     )
     scan_kind_select = Select(
         title="Type",
@@ -1488,6 +1528,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     def empty_portfolio_table_data() -> dict[str, list[object]]:
         return {
             "item_id": [],
+            "portfolio_use": [],
             "saved_at": [],
             "source_kind": [],
             "symbol_1": [],
@@ -1507,12 +1548,19 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "run_status": [],
         }
 
-    def portfolio_items_to_source(items: list, run_rows_by_id: dict[str, PortfolioRunRow] | None = None) -> dict[str, list[object]]:
+    def portfolio_items_to_source(
+        items: list,
+        run_rows_by_id: dict[str, PortfolioRunRow] | None = None,
+        *,
+        active_item_ids: set[str] | None = None,
+    ) -> dict[str, list[object]]:
         rows = empty_portfolio_table_data()
         lookup = run_rows_by_id or {}
+        active_lookup = active_item_ids if active_item_ids is not None else {item.item_id for item in items}
         for item in items:
             run_row = lookup.get(item.item_id)
             rows["item_id"].append(item.item_id)
+            rows["portfolio_use"].append("on" if item.item_id in active_lookup else "off")
             rows["saved_at"].append(item.saved_at)
             rows["source_kind"].append(item.source_kind)
             rows["symbol_1"].append(item.symbol_1)
@@ -1571,6 +1619,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         return data
 
     portfolio_table_source = ColumnDataSource(empty_portfolio_table_data())
+    portfolio_table_action_source = ColumnDataSource({"item_id": [], "nonce": []})
     portfolio_equity_source = ColumnDataSource({"time": [], "equity": []})
     portfolio_weight_source = ColumnDataSource(empty_portfolio_weight_data())
     portfolio_correlation_source = ColumnDataSource(empty_portfolio_correlation_data())
@@ -1593,12 +1642,13 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "uses inverse return volatility penalized by mean absolute return correlation.</p>"
         )
     )
+    portfolio_equity_base_title = "Portfolio Equity"
     portfolio_equity_plot = figure(
-        title="Portfolio Equity",
+        title=portfolio_equity_base_title,
         x_axis_type="datetime",
         x_range=Range1d(start=_datetime_to_bokeh_millis(history_start), end=_datetime_to_bokeh_millis(now_utc)),
         y_range=Range1d(start=0.0, end=1.0),
-        height=260,
+        height=390,
         sizing_mode="stretch_width",
         tools="pan,wheel_zoom,box_zoom,reset,save",
         active_scroll="wheel_zoom",
@@ -1614,6 +1664,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     portfolio_table = DataTable(
         source=portfolio_table_source,
         columns=[
+            TableColumn(field="portfolio_use", title="Use", width=52),
             TableColumn(field="saved_at", title="Saved", formatter=DateFormatter(format="%Y-%m-%d %H:%M"), width=122),
             TableColumn(field="source_kind", title="Source", width=112),
             TableColumn(field="symbol_1", title="Symbol 1", width=96),
@@ -1693,6 +1744,68 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         sizing_mode="stretch_width",
         styles={"gap": "10px"},
     )
+
+    portfolio_table_double_click_callback = CustomJS(
+        args=dict(table=portfolio_table, source=portfolio_table_source, action_source=portfolio_table_action_source),
+        code="""
+function pushChildViews(stack, view) {
+  if (view == null) return;
+  const childViews = view.child_views != null ? view.child_views : view._child_views;
+  if (childViews == null) return;
+  if (Array.isArray(childViews)) {
+    for (const child of childViews) stack.push(child);
+    return;
+  }
+  if (typeof childViews.values === "function") {
+    for (const child of childViews.values()) stack.push(child);
+    return;
+  }
+  if (typeof childViews[Symbol.iterator] === "function") {
+    for (const child of childViews) stack.push(child);
+  }
+}
+function findView(modelId) {
+  const rootViews = Object.values(Bokeh.index || {});
+  const stack = rootViews.slice();
+  while (stack.length > 0) {
+    const view = stack.pop();
+    if (view == null) continue;
+    if (view.model != null && view.model.id === modelId) return view;
+    pushChildViews(stack, view);
+  }
+  return null;
+}
+function attach() {
+  const view = findView(table.id);
+  if (view == null) return false;
+  const grid = view.grid;
+  if (grid == null || grid.onDblClick == null || typeof grid.onDblClick.subscribe !== "function") return false;
+  window.__mtTableDblClickBindings = window.__mtTableDblClickBindings || {};
+  if (window.__mtTableDblClickBindings[table.id] === grid) return true;
+  grid.onDblClick.subscribe((_event, args) => {
+    const row = args != null ? args.row : null;
+    if (!Number.isInteger(row) || row < 0) return;
+    const sourceIndex = view.data != null && Array.isArray(view.data.index) && row < view.data.index.length
+      ? view.data.index[row]
+      : row;
+    if (!Number.isInteger(sourceIndex) || sourceIndex < 0) return;
+    const itemIds = source.data.item_id || [];
+    if (sourceIndex >= itemIds.length) return;
+    action_source.data = {
+      item_id: [String(itemIds[sourceIndex])],
+      nonce: [Date.now()],
+    };
+    action_source.change.emit();
+  });
+  window.__mtTableDblClickBindings[table.id] = grid;
+  return true;
+}
+if (!attach()) {
+  window.setTimeout(attach, 250);
+}
+""",
+    )
+    doc.js_on_event(DocumentReady, portfolio_table_double_click_callback)
 
     plot_font_size_input = Spinner(title="Plot Font", low=8, high=24, step=1, value=11, width=92)
     plot_height_single_input = Spinner(title="1 Plot", low=160, step=20, value=560, width=92)
@@ -1959,47 +2072,29 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             return
 
         left_margin = 16
-        right_margin = 16
-        available_width = max(320, plot_width - left_margin - right_margin)
         baseline_y = 20
         gap = 18
         padding_px = 18
+        overlay_anchor = "top" if plot_height <= 340 else "bottom"
 
         base_font_px = max(8, int(_read_spinner_value(plot_font_size_input, 11, cast=int)))
-        font_candidates = []
-        seen_font_sizes: set[int] = set()
-        for candidate in (base_font_px, base_font_px - 1, base_font_px - 2, base_font_px - 3, 8):
-            candidate_int = max(8, int(candidate))
-            if candidate_int not in seen_font_sizes:
-                seen_font_sizes.add(candidate_int)
-                font_candidates.append(candidate_int)
-        chosen_font_px = font_candidates[-1] if font_candidates else 8
-        chosen_widths: list[float] = []
-        for font_px in font_candidates:
-            char_px = font_px * 0.62
-            widths = []
-            for label in visible_labels:
-                lines = label.text.splitlines() or [label.text]
-                max_len = max(len(line) for line in lines)
-                widths.append(max_len * char_px + padding_px)
-            total_width = sum(widths) + gap * max(0, len(widths) - 1)
-            chosen_font_px = font_px
-            chosen_widths = widths
-            if total_width <= available_width:
-                break
-
-        total_width = sum(chosen_widths) + gap * max(0, len(chosen_widths) - 1)
-        if total_width > available_width and chosen_widths:
-            squeeze_ratio = max(0.82, (available_width - gap * max(0, len(chosen_widths) - 1)) / max(1.0, sum(chosen_widths)))
-            chosen_widths = [width * squeeze_ratio for width in chosen_widths]
-            total_width = sum(chosen_widths) + gap * max(0, len(chosen_widths) - 1)
-
-        cursor_x = left_margin + max(0.0, (available_width - total_width) / 2.0)
-        for label, width in zip(visible_labels, chosen_widths):
+        chosen_font_px, positions = compute_overlay_label_layout(
+            [label.text for label in visible_labels],
+            plot_width,
+            base_font_px=base_font_px,
+            plot_height=plot_height,
+            left_margin=left_margin,
+            right_margin=16,
+            gap=gap,
+            padding_px=padding_px,
+            baseline_y=baseline_y,
+            top_margin=72,
+            vertical_anchor=overlay_anchor,
+        )
+        for label, (x_pos, y_pos) in zip(visible_labels, positions):
             label.text_font_size = f"{chosen_font_px}px"
-            label.x = int(cursor_x)
-            label.y = baseline_y
-            cursor_x += width + gap
+            label.x = x_pos
+            label.y = y_pos
 
     def sync_equity_legend(symbol_1: str | None, symbol_2: str | None) -> None:
         if not equity_plot.legend:
@@ -2240,6 +2335,9 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             exit_z=float(params.exit_z),
             stop_z=None if params.stop_z is None else float(params.stop_z),
         )
+        apply_zscore_diagnostics_payload(payload)
+
+    def apply_zscore_diagnostics_payload(payload) -> None:
         zscore_metrics_source.data = payload.metrics_source
         zscore_hist_source.data = payload.histogram_source
         zscore_metrics_div.text = payload.summary_html
@@ -2293,16 +2391,236 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         state.trades_source.selected.indices = []
         clear_trade_highlights()
         clear_zscore_diagnostics_outputs()
-        state.shared_x_range.start = 0
-        state.shared_x_range.end = 1
-        rebalance_layout()
+        set_shared_x_range(0, 1)
         refresh_plot_ranges()
+        update_gapless_x_axis()
         sync_optimization_cutoff_marker(test_started_at=None, test_ended_at=None)
         sync_optimization_train_overlay(test_started_at=None, test_ended_at=None)
         set_equity_summary_overlay(None)
         sync_equity_legend(None, None)
         summary_div.text = message
         return False
+
+    def current_backtest_request(
+        *,
+        period_override: tuple[datetime, datetime] | None = None,
+    ) -> tuple[dict[str, object] | None, str | None]:
+        if algorithm_select.value != "distance":
+            return None, "<p>Only the first Distance tester slice is wired right now.</p>"
+
+        pair = current_pair()
+        if pair is None:
+            return None, "<p>Refresh instruments and choose two different valid instruments first.</p>"
+
+        if period_override is None:
+            started_at = _coerce_datetime(period_slider.value[0])
+            ended_at = _coerce_datetime(period_slider.value[1])
+        else:
+            started_at, ended_at = period_override
+
+        return (
+            {
+                "pair": pair,
+                "timeframe": Timeframe(timeframe_select.value),
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "defaults": build_defaults(),
+                "params": build_distance_params(),
+            },
+            None,
+        )
+
+    def run_tester_job(request: dict[str, object]) -> dict[str, object]:
+        pair = request["pair"]
+        timeframe = request["timeframe"]
+        started_at = request["started_at"]
+        ended_at = request["ended_at"]
+        activation_started_at = request.get("activation_started_at")
+        defaults = request["defaults"]
+        params = request["params"]
+        assert isinstance(pair, PairSelection)
+        assert isinstance(timeframe, Timeframe)
+        assert isinstance(started_at, datetime)
+        assert isinstance(ended_at, datetime)
+        assert isinstance(defaults, StrategyDefaults)
+        assert isinstance(params, DistanceParameters)
+        if activation_started_at is not None:
+            assert isinstance(activation_started_at, datetime)
+
+        strategy_started_at = started_at
+        padded_display = False
+        if (
+            isinstance(activation_started_at, datetime)
+            and started_at < activation_started_at < ended_at
+        ):
+            strategy_started_at = activation_started_at
+            padded_display = True
+
+        result = run_distance_backtest(
+            broker=broker,
+            pair=pair,
+            timeframe=timeframe,
+            started_at=strategy_started_at,
+            ended_at=ended_at,
+            defaults=defaults,
+            params=params,
+        )
+        if result.frame.is_empty():
+            return {
+                "status": "empty",
+                "symbol_1": pair.symbol_1,
+                "symbol_2": pair.symbol_2,
+                "timeframe": timeframe.value,
+                "started_at": started_at,
+                "ended_at": ended_at,
+            }
+
+        if padded_display:
+            display_frame = load_pair_frame(
+                broker=broker,
+                pair=pair,
+                timeframe=timeframe,
+                started_at=started_at,
+                ended_at=ended_at,
+            )
+            sources = result_to_padded_sources(
+                result,
+                display_frame,
+                initial_capital=float(defaults.initial_capital),
+            )
+        else:
+            sources = result_to_sources(result)
+
+        return {
+            "status": "ok",
+            "sources": sources,
+            "summary": result.summary,
+            "zscore_payload": build_zscore_diagnostics(
+                result.frame,
+                entry_z=float(params.entry_z),
+                exit_z=float(params.exit_z),
+                stop_z=None if params.stop_z is None else float(params.stop_z),
+            ),
+            "timeframe": timeframe.value,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "strategy_started_at": strategy_started_at if padded_display else None,
+        }
+
+    def apply_backtest_payload(payload: dict[str, object]) -> bool:
+        status = str(payload.get("status", "error"))
+        if status != "ok":
+            symbol_1 = str(payload.get("symbol_1", ""))
+            symbol_2 = str(payload.get("symbol_2", ""))
+            timeframe_value = str(payload.get("timeframe", timeframe_select.value))
+            started_at = payload.get("started_at")
+            ended_at = payload.get("ended_at")
+            if isinstance(started_at, datetime) and isinstance(ended_at, datetime):
+                return clear_backtest_outputs(
+                    f"<p>No aligned parquet data found for <b>{symbol_1}</b> / <b>{symbol_2}</b> "
+                    f"on <b>{timeframe_value}</b> between "
+                    f"<b>{started_at:%Y-%m-%d %H:%M}</b> and <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+                )
+            return clear_backtest_outputs("<p>Test run produced no aligned data.</p>")
+
+        sources = payload.get("sources")
+        summary = payload.get("summary")
+        zscore_payload = payload.get("zscore_payload")
+        started_at = payload.get("started_at")
+        ended_at = payload.get("ended_at")
+        strategy_started_at = payload.get("strategy_started_at")
+        timeframe_value = str(payload.get("timeframe", timeframe_select.value))
+        if not isinstance(sources, dict) or not isinstance(summary, dict):
+            return clear_backtest_outputs("<p>Test run returned an invalid payload.</p>")
+        if not isinstance(started_at, datetime) or not isinstance(ended_at, datetime):
+            return clear_backtest_outputs("<p>Test run returned an invalid tester period.</p>")
+
+        state.price_1_source.data = sources["price_1"]
+        state.price_2_source.data = sources["price_2"]
+        state.spread_source.data = sources["spread"]
+        state.zscore_source.data = sources["zscore"]
+        state.equity_source.data = sources["equity"]
+        state.trades_source.data = sources["trades"]
+        state.trade_markers_1.data = sources["markers_1"]
+        state.trade_markers_2.data = sources["markers_2"]
+        state.trade_segments_1.data = sources["segments_1"]
+        state.trade_segments_2.data = sources["segments_2"]
+        state.trades_source.selected.indices = []
+        clear_trade_highlights()
+        if zscore_payload is None:
+            clear_zscore_diagnostics_outputs()
+        else:
+            apply_zscore_diagnostics_payload(zscore_payload)
+
+        x_values = sources["price_1"].get("x", [])
+        set_shared_x_range(0.0, float(max(1, len(x_values) - 1)))
+        refresh_plot_ranges()
+        update_gapless_x_axis()
+        sync_optimization_cutoff_marker(test_started_at=started_at, test_ended_at=ended_at)
+        sync_optimization_train_overlay(test_started_at=started_at, test_ended_at=ended_at)
+
+        sync_equity_legend(str(summary["symbol_1"]), str(summary["symbol_2"]))
+        set_equity_summary_overlay(summary)
+        completed_at = datetime.now(UTC)
+        strategy_window_note = ""
+        if isinstance(strategy_started_at, datetime) and strategy_started_at > started_at:
+            strategy_window_note = (
+                f" Strategy logic starts at <b>{strategy_started_at:%Y-%m-%d %H:%M} UTC</b> "
+                f"to match the optimizer window while keeping the full tester axis visible."
+            )
+        summary_div.text = (
+            f"<p>Distance test completed at <b>{completed_at:%Y-%m-%d %H:%M:%S} UTC</b> for "
+            f"<b>{summary['symbol_1']}</b> / <b>{summary['symbol_2']}</b> on <b>{timeframe_value}</b>. "
+            f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
+            f"Trades: <b>{int(summary.get('trades', 0) or 0)}</b>, Net: <b>{float(summary.get('net_pnl', 0.0) or 0.0):.2f}</b>."
+            f"{strategy_window_note}</p>"
+        )
+        return True
+
+    def submit_tester_request(
+        request: dict[str, object],
+        *,
+        pending_message: str,
+    ) -> tuple[bool, str | None]:
+        nonlocal tester_future, tester_poll_callback
+        if tester_future is not None and not tester_future.done():
+            return False, "<p>Distance test is already running. Wait for the current run to finish.</p>"
+        if tester_future is not None and tester_future.done():
+            poll_tester_future()
+        mark_test_running()
+        summary_div.text = pending_message
+        tester_future = tester_executor.submit(run_tester_job, request)
+        if tester_poll_callback is None:
+            tester_poll_callback = doc.add_periodic_callback(poll_tester_future, 100)
+        return True, None
+
+    def poll_tester_future() -> None:
+        nonlocal tester_future
+        if tester_future is None:
+            return
+        if not tester_future.done():
+            return
+
+        future = tester_future
+        tester_future = None
+        clear_tester_poll_callback()
+        reset_run_button()
+
+        try:
+            payload = future.result()
+        except Exception as exc:  # pragma: no cover - runtime UI path
+            clear_backtest_outputs(f"<p>Test run failed: {exc}</p>")
+            return
+        apply_backtest_payload(payload)
+
+    def set_shared_x_range(start: float, end: float) -> None:
+        nonlocal suppress_shared_range_change
+        suppress_shared_range_change = True
+        try:
+            state.shared_x_range.start = start
+            state.shared_x_range.end = end
+        finally:
+            suppress_shared_range_change = False
 
     def refresh_plot_ranges() -> None:
         for key, plot, source, value_columns, body, _toggle in plot_bindings:
@@ -2347,11 +2665,12 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         visible_plots = [plot for _key, plot, _source, _columns, body, _toggle in plot_bindings if body.visible]
         visible_blocks = [body for _key, body, _toggle in block_bindings if body.visible]
         plot_height = configured_plot_height(len(visible_plots), len(visible_blocks))
+        equity_visible = equity_body.visible
         for _key, plot, _source, _columns, body, toggle in plot_bindings:
             plot.visible = body.visible
             toggle.button_type = "primary" if body.visible else "default"
             if body.visible:
-                plot.height = plot_height
+                plot.height = compute_relative_plot_height(_key, plot_height, equity_visible=equity_visible)
         sync_equity_summary_overlay_position()
         for _key, body, toggle in block_bindings:
             toggle.button_type = "primary" if body.visible else "default"
@@ -2459,10 +2778,24 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         except Exception as exc:  # pragma: no cover - runtime UI path
             summary_div.text = f"<p>Instrument catalog unavailable: {exc}</p>"
             return [INSTRUMENT_PLACEHOLDER]
-        if selected_group != 'all':
-            catalog = catalog.filter(pl.col('normalized_group') == selected_group)
+        catalog = filter_catalog_by_group(catalog, selected_group)
         options = catalog.get_column('symbol').sort().to_list() if not catalog.is_empty() else []
         return options or [INSTRUMENT_PLACEHOLDER]
+
+    def available_catalog_group_options() -> list[str]:
+        try:
+            catalog = load_instrument_catalog_frame(broker)
+        except Exception:
+            return list(GROUP_OPTIONS)
+        return list_mt5_group_options(catalog)
+
+    def sync_catalog_group_select_options() -> None:
+        options = available_catalog_group_options()
+        for selector in (group_select, scan_universe_select, download_group_select):
+            current_value = selector.value if selector.value in options else options[0]
+            selector.options = options
+            if selector.value != current_value:
+                selector.value = current_value
 
     def current_download_terminal_path() -> Path:
         configured = settings.mt5_terminal_path or DEFAULT_MT5_TERMINAL_PATH
@@ -2894,6 +3227,24 @@ if (!targets.length) {
         optimization_run_button.label = "Stopping..." if stopping else "Stop Optimization"
         optimization_run_button.button_type = "warning"
 
+    def reset_run_button() -> None:
+        run_button.label = "Run Test"
+        run_button.button_type = "success"
+
+    def mark_test_running() -> None:
+        run_button.label = "Running Test..."
+        run_button.button_type = "warning"
+
+    def clear_tester_poll_callback() -> None:
+        nonlocal tester_poll_callback
+        if tester_poll_callback is None:
+            return
+        try:
+            doc.remove_periodic_callback(tester_poll_callback)
+        except ValueError:
+            pass
+        tester_poll_callback = None
+
     def update_optimization_progress(completed: int, total: int, stage: str) -> None:
         optimization_progress["completed"] = completed
         optimization_progress["total"] = total
@@ -2957,17 +3308,16 @@ if (!targets.length) {
     def optimization_outputs_present() -> bool:
         return bool(state.optimization_source.data.get("trial_id", []))
 
-    def apply_optimization_trial(
+    def copy_optimization_trial_to_tester(
         index: int,
         *,
         period_override: tuple[datetime, datetime] | None = None,
     ) -> tuple[bool, object | None, tuple[datetime, datetime]]:
+        nonlocal suppress_optimization_config_change
         data = state.optimization_source.data
         trial_ids = list(data.get("trial_id", []))
-        # UX contract:
-        # Optimizer row replay always runs charts on the current tester period.
-        # Optimization Period belongs only to the optimizer job itself and must
-        # never overwrite tester dates when a result row is replayed.
+        optimization_started_at = _coerce_datetime(optimization_period_slider.value[0])
+        optimization_ended_at = _coerce_datetime(optimization_period_slider.value[1])
         period = period_override or (
             _coerce_datetime(period_slider.value[0]),
             _coerce_datetime(period_slider.value[1]),
@@ -2975,26 +3325,82 @@ if (!targets.length) {
         if index < 0 or index >= len(trial_ids):
             return False, None, period
 
-        optimization_started_at = _coerce_datetime(optimization_period_slider.value[0])
-        optimization_ended_at = _coerce_datetime(optimization_period_slider.value[1])
-        set_tester_context(
-            "optimization_row",
-            oos_started_at=optimization_ended_at,
-            context_started_at=optimization_started_at,
-            context_ended_at=optimization_ended_at,
-        )
-        lookback_input.value = int(data["lookback_bars"][index])
-        entry_input.value = float(data["entry_z"][index])
-        exit_input.value = float(data["exit_z"][index])
-        raw_stop = data["stop_z"][index]
-        if raw_stop in (None, ""):
-            stop_mode_select.value = "disabled"
-        else:
-            stop_mode_select.value = "enabled"
-            stop_input.value = float(raw_stop)
-        bollinger_input.value = float(data["bollinger_k"][index])
+        doc.hold("combine")
+        suppress_optimization_config_change = True
+        try:
+            with file_state_controller.suspend():
+                set_tester_context(
+                    "optimization_row",
+                    oos_started_at=optimization_ended_at,
+                    context_started_at=optimization_started_at,
+                    context_ended_at=optimization_ended_at,
+                )
+                lookback_input.value = int(data["lookback_bars"][index])
+                entry_input.value = float(data["entry_z"][index])
+                exit_input.value = float(data["exit_z"][index])
+                raw_stop = data["stop_z"][index]
+                if raw_stop in (None, ""):
+                    stop_mode_select.value = "disabled"
+                else:
+                    stop_mode_select.value = "enabled"
+                    stop_input.value = float(raw_stop)
+                bollinger_input.value = float(data["bollinger_k"][index])
+        finally:
+            suppress_optimization_config_change = False
+            doc.unhold()
+        file_state_controller.persist()
+        return True, trial_ids[index], period
+
+    def apply_optimization_trial(
+        index: int,
+        *,
+        period_override: tuple[datetime, datetime] | None = None,
+    ) -> tuple[bool, object | None, tuple[datetime, datetime]]:
+        copied, trial_id, period = copy_optimization_trial_to_tester(index, period_override=period_override)
+        if not copied:
+            return False, trial_id, period
         ran = apply_backtest_result(period_override=period)
-        return ran, trial_ids[index], period
+        return ran, trial_id, period
+
+    def render_optimization_trial_in_tester(
+        index: int,
+        *,
+        selection_label: str,
+    ) -> bool:
+        copied, trial_id, tester_period = copy_optimization_trial_to_tester(index)
+        if not copied:
+            return False
+        request, error_message = current_backtest_request(period_override=tester_period)
+        if request is None:
+            clear_backtest_outputs(error_message or "<p>Test request is invalid.</p>")
+            return False
+        pair = request["pair"]
+        timeframe = request["timeframe"]
+        started_at = request["started_at"]
+        ended_at = request["ended_at"]
+        assert isinstance(pair, PairSelection)
+        assert isinstance(timeframe, Timeframe)
+        assert isinstance(started_at, datetime)
+        assert isinstance(ended_at, datetime)
+        # UX contract:
+        # clicking an optimizer row copies only strategy parameters into the
+        # tester; the replay itself must run on the full current tester period.
+        submitted, busy_message = submit_tester_request(
+            request,
+            pending_message=(
+                f"<p>Running Distance test for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
+                f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            ),
+        )
+        if not submitted:
+            optimization_status_div.text = f"{optimization_summary_html}{busy_message or ''}"
+            return False
+        optimization_status_div.text = (
+            f"{optimization_summary_html}"
+            f"<p>{selection_label} <b>{trial_id}</b> copied into tester inputs and is rendering on tester period "
+            f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
+        )
+        return True
 
     def current_optimization_signature() -> dict[str, object] | None:
         pair = current_pair()
@@ -3046,6 +3452,8 @@ if (!targets.length) {
         return changed
 
     def on_optimization_config_change(_attr: str, _old: object, _new: object) -> None:
+        if suppress_optimization_config_change:
+            return
         tester_started_at = _coerce_datetime(period_slider.value[0])
         tester_ended_at = _coerce_datetime(period_slider.value[1])
         sync_optimization_cutoff_marker(test_started_at=tester_started_at, test_ended_at=tester_ended_at)
@@ -3205,11 +3613,129 @@ if (!targets.length) {
         meta_equity_plot.y_range.start = y_low - padding
         meta_equity_plot.y_range.end = y_high + padding
 
+    def active_portfolio_item_ids(items: list | None = None) -> set[str]:
+        current_items = items if items is not None else list(portfolio_items_by_id.values())
+        valid_ids = {item.item_id for item in current_items}
+        return {item_id for item_id in valid_ids if item_id not in portfolio_excluded_item_ids}
+
+    def portfolio_allocation_capitals_by_id() -> dict[str, float]:
+        return {
+            item_id: max(float(row.allocation_capital or 0.0), 0.0)
+            for item_id, row in portfolio_run_rows_by_id.items()
+        }
+
+    def portfolio_display_allocation_capitals(
+        items: list,
+        *,
+        active_item_ids: set[str],
+        active_allocation_capitals_by_id: dict[str, float],
+        fallback_allocation_capital: float,
+    ) -> dict[str, float]:
+        return materialize_portfolio_backtest_allocations(
+            [item.item_id for item in items],
+            allocation_capitals_by_id={
+                item_id: active_allocation_capitals_by_id[item_id]
+                for item_id in active_item_ids
+                if item_id in active_allocation_capitals_by_id
+            },
+            fallback_allocation_capital=max(float(fallback_allocation_capital), 1e-9),
+        )
+
+    def selected_portfolio_item_id() -> str | None:
+        indices = list(portfolio_table_source.selected.indices)
+        if not indices:
+            return None
+        item_ids = portfolio_table_source.data.get("item_id", [])
+        index = indices[0]
+        if index < 0 or index >= len(item_ids):
+            return None
+        return str(item_ids[index])
+
+    def build_portfolio_curve_source_data(curve: PortfolioCurve) -> dict[str, list[object]]:
+        return {
+            "time": [_datetime_to_bokeh_millis(moment) for moment in curve.times],
+            "equity": curve.equities,
+        }
+
+    def portfolio_curve_source_data(curve: PortfolioCurve) -> dict[str, list[object]]:
+        cached = portfolio_curve_sources_by_id.get(curve.item_id)
+        if cached is not None:
+            return cached
+        source_data = build_portfolio_curve_source_data(curve)
+        portfolio_curve_sources_by_id[curve.item_id] = source_data
+        return source_data
+
+    def set_portfolio_x_range(start: object, end: object) -> None:
+        nonlocal suppress_portfolio_range_change
+        suppress_portfolio_range_change = True
+        try:
+            portfolio_equity_plot.x_range.start = start
+            portfolio_equity_plot.x_range.end = end
+        finally:
+            suppress_portfolio_range_change = False
+
+    def render_portfolio_equity_curve(
+        curve: PortfolioCurve,
+        *,
+        title: str,
+        oos_started_at: datetime | None,
+    ) -> None:
+        source_data = portfolio_curve_source_data(curve)
+        doc.hold("combine")
+        try:
+            portfolio_equity_plot.title.text = title
+            portfolio_equity_source.data = source_data
+            refresh_portfolio_equity_ranges(source_data=source_data)
+            sync_portfolio_oos_cutoff_marker(oos_started_at)
+        finally:
+            doc.unhold()
+
+    def render_portfolio_combined_equity() -> None:
+        active_ids = active_portfolio_item_ids()
+        combined = combine_portfolio_equity_curves(
+            list(portfolio_curves_by_id.values()),
+            included_item_ids=active_ids,
+            allocation_capitals_by_id=portfolio_allocation_capitals_by_id(),
+        )
+        if combined.is_empty():
+            portfolio_equity_plot.title.text = portfolio_equity_base_title
+            clear_portfolio_equity_outputs()
+            return
+        active_items = [item for item_id, item in portfolio_items_by_id.items() if item_id in active_ids]
+        source_data = {
+            "time": [_datetime_to_bokeh_millis(moment) for moment in combined.get_column("time").to_list()],
+            "equity": [float(value) for value in combined.get_column("equity").to_list()],
+        }
+        latest_oos_started_at = latest_portfolio_oos_started_at(active_items)
+        doc.hold("combine")
+        try:
+            portfolio_equity_plot.title.text = portfolio_equity_base_title
+            portfolio_equity_source.data = source_data
+            refresh_portfolio_equity_ranges(source_data=source_data)
+            sync_portfolio_oos_cutoff_marker(latest_oos_started_at)
+        finally:
+            doc.unhold()
+
+    def sync_portfolio_equity_view() -> None:
+        selected_item_id = portfolio_preview_item_id or selected_portfolio_item_id()
+        if selected_item_id:
+            curve = portfolio_curves_by_id.get(selected_item_id)
+            item = portfolio_items_by_id.get(selected_item_id)
+            if curve is not None and curve.times and curve.equities:
+                title = f"{curve.symbol_1} / {curve.symbol_2} [{curve.timeframe}]"
+                render_portfolio_equity_curve(
+                    curve,
+                    title=title,
+                    oos_started_at=None if item is None else item.oos_started_at,
+                )
+                return
+        render_portfolio_combined_equity()
+
     def clear_portfolio_equity_outputs() -> None:
+        portfolio_equity_plot.title.text = portfolio_equity_base_title
         portfolio_equity_source.data = {"time": [], "equity": []}
         portfolio_oos_cutoff_span.visible = False
-        portfolio_equity_plot.x_range.start = _datetime_to_bokeh_millis(history_start)
-        portfolio_equity_plot.x_range.end = _datetime_to_bokeh_millis(now_utc)
+        set_portfolio_x_range(_datetime_to_bokeh_millis(history_start), _datetime_to_bokeh_millis(now_utc))
         portfolio_equity_plot.y_range.start = 0.0
         portfolio_equity_plot.y_range.end = 1.0
 
@@ -3222,25 +3748,53 @@ if (!targets.length) {
             "uses inverse return volatility penalized by mean absolute return correlation.</p>"
         )
 
-    def refresh_portfolio_equity_ranges() -> None:
-        times = list(portfolio_equity_source.data.get("time", []))
-        equities = [float(value) for value in portfolio_equity_source.data.get("equity", [])]
+    def refresh_portfolio_equity_ranges(
+        *,
+        reset_x_range: bool = True,
+        source_data: dict[str, list[object]] | None = None,
+    ) -> None:
+        data = source_data if source_data is not None else portfolio_equity_source.data
+        times = list(data.get("time", []))
+        equities = [float(value) for value in data.get("equity", [])]
         if not times or not equities:
             clear_portfolio_equity_outputs()
             return
-        x_start = min(times)
-        x_end = max(times)
-        if x_start == x_end:
-            x_end = x_start + (datetime.resolution * 1000)
-        y_low = min(equities)
-        y_high = max(equities)
+        full_x_start = float(times[0]) if times else _datetime_to_bokeh_millis(history_start)
+        full_x_end = float(times[-1]) if times else _datetime_to_bokeh_millis(now_utc)
+        if full_x_end < full_x_start:
+            full_x_start = min(float(value) for value in times)
+            full_x_end = max(float(value) for value in times)
+        if full_x_start == full_x_end:
+            full_x_end = full_x_start + 1.0
+        if reset_x_range:
+            set_portfolio_x_range(full_x_start, full_x_end)
+            visible_x_start = full_x_start
+            visible_x_end = full_x_end
+            y_low = min(equities)
+            y_high = max(equities)
+        else:
+            visible_x_start = portfolio_equity_plot.x_range.start
+            visible_x_end = portfolio_equity_plot.x_range.end
+            if visible_x_start is None or visible_x_end is None:
+                visible_x_start = full_x_start
+                visible_x_end = full_x_end
+            y_low, y_high = compute_series_bounds(
+                times,
+                [equities],
+                visible_x_start,
+                visible_x_end,
+                pad_ratio=0.08,
+            )
+        if reset_x_range:
+            if abs(y_high - y_low) <= 1e-9:
+                y_high = y_low + 1.0
+            padding = max(1.0, (y_high - y_low) * 0.08)
+            y_low -= padding
+            y_high += padding
         if abs(y_high - y_low) <= 1e-9:
             y_high = y_low + 1.0
-        padding = max(1.0, (y_high - y_low) * 0.08)
-        portfolio_equity_plot.x_range.start = x_start
-        portfolio_equity_plot.x_range.end = x_end
-        portfolio_equity_plot.y_range.start = y_low - padding
-        portfolio_equity_plot.y_range.end = y_high + padding
+        portfolio_equity_plot.y_range.start = y_low
+        portfolio_equity_plot.y_range.end = y_high
 
     def sync_portfolio_oos_cutoff_marker(oos_started_at: datetime | None) -> None:
         if oos_started_at is None:
@@ -3255,38 +3809,32 @@ if (!targets.length) {
         started_at: datetime,
         ended_at: datetime,
         allocation_capitals_by_id: dict[str, float],
+        included_item_ids: set[str] | None = None,
     ) -> tuple[list[PortfolioCurve], dict[str, PortfolioRunRow], int, int]:
         current_fee_mode = str(bybit_fee_mode_select.value or settings.bybit_tradfi_fee_mode)
         curves: list[PortfolioCurve] = []
         next_rows: dict[str, PortfolioRunRow] = {}
         no_data_count = 0
-        excluded_count = 0
+        included_lookup = included_item_ids if included_item_ids is not None else {item.item_id for item in items}
+        excluded_count = sum(1 for item in items if item.item_id not in included_lookup)
         try:
             for item in items:
                 allocation_capital = max(float(allocation_capitals_by_id.get(item.item_id, 0.0) or 0.0), 0.0)
                 if allocation_capital <= 0.0:
-                    excluded_count += 1
-                    next_rows[item.item_id] = PortfolioRunRow(
-                        item_id=item.item_id,
-                        symbol_1=item.symbol_1,
-                        symbol_2=item.symbol_2,
-                        timeframe=item.timeframe.value,
-                        allocation_capital=0.0,
-                        net_profit=None,
-                        ending_equity=None,
-                        max_drawdown=None,
-                        trades=None,
-                        status="excluded",
-                    )
-                    continue
+                    allocation_capital = 0.0
                 os.environ["MT_SERVICE_BYBIT_TRADFI_FEE_MODE"] = str(item.fee_mode or current_fee_mode)
                 get_settings.cache_clear()
-                defaults = scale_defaults_for_portfolio_item(item, allocation_capital)
+                defaults = scale_defaults_for_portfolio_item(item, float(item.initial_capital))
+                strategy_started_at = portfolio_strategy_started_at(
+                    item,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                )
                 result = run_distance_backtest(
                     broker=broker,
                     pair=PairSelection(symbol_1=item.symbol_1, symbol_2=item.symbol_2),
                     timeframe=item.timeframe,
-                    started_at=started_at,
+                    started_at=strategy_started_at,
                     ended_at=ended_at,
                     defaults=defaults,
                     params=item.params(),
@@ -3309,7 +3857,7 @@ if (!targets.length) {
                         symbol_1=item.symbol_1,
                         symbol_2=item.symbol_2,
                         timeframe=item.timeframe.value,
-                        allocation_capital=defaults.initial_capital,
+                        allocation_capital=allocation_capital,
                         net_profit=None,
                         ending_equity=None,
                         max_drawdown=None,
@@ -3318,6 +3866,15 @@ if (!targets.length) {
                     )
                     continue
                 frame = result.frame
+                curve_times = list(frame.get_column("time").to_list())
+                curve_equities = [float(value) for value in frame.get_column("equity_total").to_list()]
+                curve_times, curve_equities = prepend_flat_equity_prefix(
+                    curve_times,
+                    curve_equities,
+                    period_started_at=started_at,
+                    strategy_started_at=strategy_started_at,
+                    initial_capital=defaults.initial_capital,
+                )
                 curves.append(
                     PortfolioCurve(
                         item_id=item.item_id,
@@ -3325,8 +3882,8 @@ if (!targets.length) {
                         symbol_2=item.symbol_2,
                         timeframe=item.timeframe.value,
                         initial_capital=defaults.initial_capital,
-                        times=list(frame.get_column("time").to_list()),
-                        equities=[float(value) for value in frame.get_column("equity_total").to_list()],
+                        times=curve_times,
+                        equities=curve_equities,
                     )
                 )
                 summary = result.summary
@@ -3335,7 +3892,7 @@ if (!targets.length) {
                     symbol_1=item.symbol_1,
                     symbol_2=item.symbol_2,
                     timeframe=item.timeframe.value,
-                    allocation_capital=defaults.initial_capital,
+                    allocation_capital=allocation_capital,
                     net_profit=float(summary.get("net_pnl", 0.0) or 0.0),
                     ending_equity=float(summary.get("ending_equity", defaults.initial_capital) or defaults.initial_capital),
                     max_drawdown=float(summary.get("max_drawdown", 0.0) or 0.0),
@@ -3371,15 +3928,44 @@ if (!targets.length) {
         )
         return suggestion_rows
 
-    def refresh_portfolio_table(*, status_text: str | None = None) -> None:
-        nonlocal portfolio_run_rows_by_id
+    def refresh_portfolio_table(
+        *,
+        status_text: str | None = None,
+        preserve_selected_item_id: str | None = None,
+    ) -> None:
+        nonlocal portfolio_run_rows_by_id, portfolio_preview_item_id
         items = load_portfolio_items()
         valid_ids = {item.item_id for item in items}
         portfolio_run_rows_by_id = {item_id: row for item_id, row in portfolio_run_rows_by_id.items() if item_id in valid_ids}
-        portfolio_table_source.data = portfolio_items_to_source(items, portfolio_run_rows_by_id)
-        portfolio_table_source.selected.indices = []
+        portfolio_curves_by_id_keys = list(portfolio_curves_by_id.keys())
+        for item_id in portfolio_curves_by_id_keys:
+            if item_id not in valid_ids:
+                portfolio_curves_by_id.pop(item_id, None)
+                portfolio_curve_sources_by_id.pop(item_id, None)
+        portfolio_items_by_id.clear()
+        portfolio_items_by_id.update({item.item_id: item for item in items})
+        portfolio_excluded_item_ids.intersection_update(valid_ids)
+        if portfolio_preview_item_id not in valid_ids:
+            portfolio_preview_item_id = None
+        selected_item_id = preserve_selected_item_id if preserve_selected_item_id in valid_ids else None
+        portfolio_table_source.data = portfolio_items_to_source(
+            items,
+            portfolio_run_rows_by_id,
+            active_item_ids=active_portfolio_item_ids(items),
+        )
+        if selected_item_id is None:
+            portfolio_table_source.selected.indices = []
+        else:
+            item_ids = list(portfolio_table_source.data.get("item_id", []))
+            try:
+                portfolio_table_source.selected.indices = [item_ids.index(selected_item_id)]
+            except ValueError:
+                portfolio_table_source.selected.indices = []
         if not items:
             portfolio_run_rows_by_id = {}
+            portfolio_curves_by_id.clear()
+            portfolio_curve_sources_by_id.clear()
+            portfolio_preview_item_id = None
             clear_portfolio_equity_outputs()
             clear_portfolio_analysis_outputs()
             portfolio_status_div.text = status_text or "<p>Portfolio is empty. Use <b>В портфель</b> in the tester to save pairs and strategy parameters.</p>"
@@ -3445,24 +4031,35 @@ if (!targets.length) {
             portfolio_analysis_div.text = "<p>Portfolio Period is invalid. End must be after start.</p>"
             return
         total_capital = float(_read_spinner_value(capital_input, 10_000.0))
-        equal_allocation = total_capital / float(len(items))
-        provisional_allocation = {item.item_id: equal_allocation for item in items}
-        curves, _rows, no_data_count, excluded_count = run_portfolio_backtests(
+        active_ids = active_portfolio_item_ids(items)
+        if not active_ids:
+            clear_portfolio_analysis_outputs()
+            portfolio_analysis_div.text = "<p>No active portfolio rows. Double-click a row again to re-enable it.</p>"
+            return
+        excluded_count = max(0, len(items) - len(active_ids))
+        equal_allocation = total_capital / float(len(active_ids))
+        active_allocation = {
+            item.item_id: (equal_allocation if item.item_id in active_ids else 0.0)
+            for item in items
+        }
+        curves, _rows, no_data_count, _ignored_excluded_count = run_portfolio_backtests(
             items,
             started_at=started_at,
             ended_at=ended_at,
-            allocation_capitals_by_id=provisional_allocation,
+            allocation_capitals_by_id=active_allocation,
+            included_item_ids=active_ids,
         )
-        suggestions = refresh_portfolio_analysis(curves, started_at=started_at, ended_at=ended_at)
+        active_curves = [curve for curve in curves if curve.item_id in active_ids]
+        suggestions = refresh_portfolio_analysis(active_curves, started_at=started_at, ended_at=ended_at)
         portfolio_status_div.text = (
             f"<p>Portfolio analysis finished for <b>{len(items)}</b> saved pair(s). "
             f"Provisional equal allocation per pair: <b>{equal_allocation:.2f}</b>. "
             f"Valid suggestion rows: <b>{len(suggestions)}</b>. Missing data rows: <b>{no_data_count}</b>. "
-            f"Excluded rows: <b>{excluded_count}</b>.</p>"
+            f"Rows excluded from combined equity: <b>{excluded_count}</b>.</p>"
         )
 
     def on_run_portfolio() -> None:
-        nonlocal portfolio_run_rows_by_id
+        nonlocal portfolio_run_rows_by_id, portfolio_preview_item_id
         items = load_portfolio_items()
         if not items:
             portfolio_status_div.text = "<p>Portfolio is empty. Save at least one tester pair first.</p>"
@@ -3477,80 +4074,138 @@ if (!targets.length) {
 
         total_capital = float(_read_spinner_value(capital_input, 10_000.0))
         allocation_mode = str(portfolio_allocation_select.value or PORTFOLIO_ALLOCATION_OPTIONS[0])
-        equal_allocation = total_capital / float(len(items))
-        final_allocation_by_id = {item.item_id: equal_allocation for item in items}
+        active_ids = active_portfolio_item_ids(items)
+        if not active_ids:
+            portfolio_run_rows_by_id = {}
+            portfolio_curves_by_id.clear()
+            portfolio_curve_sources_by_id.clear()
+            portfolio_preview_item_id = None
+            clear_portfolio_equity_outputs()
+            refresh_portfolio_table(status_text="<p>No active portfolio rows. Double-click a row again to re-enable it.</p>")
+            return
+        equal_allocation = total_capital / float(len(active_ids))
+        final_allocation_by_id = {
+            item.item_id: (equal_allocation if item.item_id in active_ids else 0.0)
+            for item in items
+        }
         final_mode_label = "equal_weight"
         no_data_count = 0
-        excluded_count = 0
+        excluded_count = max(0, len(items) - len(active_ids))
+        display_allocation_by_id = portfolio_display_allocation_capitals(
+            items,
+            active_item_ids=active_ids,
+            active_allocation_capitals_by_id=final_allocation_by_id,
+            fallback_allocation_capital=equal_allocation,
+        )
 
         if allocation_mode == "diversified_risk":
-            provisional_curves, _rows, provisional_no_data_count, provisional_excluded_count = run_portfolio_backtests(
+            provisional_curves, _rows, provisional_no_data_count, _ignored_excluded_count = run_portfolio_backtests(
                 items,
                 started_at=started_at,
                 ended_at=ended_at,
                 allocation_capitals_by_id=final_allocation_by_id,
+                included_item_ids=active_ids,
             )
-            suggestion_rows = refresh_portfolio_analysis(provisional_curves, started_at=started_at, ended_at=ended_at)
+            active_provisional_curves = [curve for curve in provisional_curves if curve.item_id in active_ids]
+            suggestion_rows = refresh_portfolio_analysis(active_provisional_curves, started_at=started_at, ended_at=ended_at)
             if suggestion_rows:
                 final_allocation_by_id = {
-                    row.item_id: total_capital * float(row.suggested_weight)
-                    for row in suggestion_rows
+                    item.item_id: 0.0
+                    for item in items
                 }
+                for row in suggestion_rows:
+                    final_allocation_by_id[row.item_id] = total_capital * float(row.suggested_weight)
+                display_allocation_by_id = portfolio_display_allocation_capitals(
+                    items,
+                    active_item_ids=active_ids,
+                    active_allocation_capitals_by_id=final_allocation_by_id,
+                    fallback_allocation_capital=equal_allocation,
+                )
                 final_mode_label = "diversified_risk"
             else:
                 final_mode_label = "equal_weight (fallback)"
             no_data_count = provisional_no_data_count
-            excluded_count = provisional_excluded_count
 
-        curves, next_rows, run_no_data_count, run_excluded_count = run_portfolio_backtests(
+        curves, next_rows, run_no_data_count, _ignored_excluded_count = run_portfolio_backtests(
             items,
             started_at=started_at,
             ended_at=ended_at,
-            allocation_capitals_by_id=final_allocation_by_id,
+            allocation_capitals_by_id=display_allocation_by_id,
+            included_item_ids=active_ids,
         )
         no_data_count = max(no_data_count, run_no_data_count)
-        excluded_count = max(excluded_count, run_excluded_count)
         portfolio_run_rows_by_id = next_rows
-        if allocation_mode != "diversified_risk":
-            refresh_portfolio_analysis(curves, started_at=started_at, ended_at=ended_at)
-        combined = combine_portfolio_equity_curves(curves)
-        if combined.is_empty():
+        portfolio_curves_by_id.clear()
+        portfolio_curve_sources_by_id.clear()
+        portfolio_curves_by_id.update({curve.item_id: curve for curve in curves})
+        if not any(curve.times and curve.equities for curve in curves if curve.item_id in active_ids):
+            portfolio_preview_item_id = None
             clear_portfolio_equity_outputs()
             refresh_portfolio_table(
                 status_text=(
-                    f"<p>Portfolio run found no aligned data for <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
+                    f"<p>Portfolio run found no aligned data for active rows on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
                     f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
-                )
+                ),
             )
             return
-
-        portfolio_equity_source.data = {
-            "time": list(combined.get_column("time").to_list()),
-            "equity": [float(value) for value in combined.get_column("equity").to_list()],
-        }
-        refresh_portfolio_equity_ranges()
-        # The portfolio OOS marker represents the latest saved OOS start across
-        # all portfolio rows, because it is the strictest "fully out-of-sample"
-        # boundary shared by the whole saved basket.
-        latest_oos_started_at = latest_portfolio_oos_started_at(items)
-        if latest_oos_started_at is not None and started_at <= latest_oos_started_at <= ended_at:
-            sync_portfolio_oos_cutoff_marker(latest_oos_started_at)
-            latest_oos_label = f"{latest_oos_started_at:%Y-%m-%d}"
-        else:
-            sync_portfolio_oos_cutoff_marker(None)
-            latest_oos_label = "n/a"
+        if allocation_mode != "diversified_risk":
+            active_curves = [curve for curve in curves if curve.item_id in active_ids]
+            refresh_portfolio_analysis(active_curves, started_at=started_at, ended_at=ended_at)
         refresh_portfolio_table(
+            preserve_selected_item_id=portfolio_preview_item_id,
             status_text=(
                 f"<p>Portfolio run finished for <b>{len(items)}</b> saved pair(s) on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
                 f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. Total capital: <b>{total_capital:.2f}</b>, "
-                f"allocation mode: <b>{final_mode_label}</b>. Baseline equal slice: <b>{equal_allocation:.2f}</b>. "
-                f"Latest saved OOS start: <b>{latest_oos_label}</b>. Missing data rows: <b>{no_data_count}</b>. "
-                f"Excluded rows: <b>{excluded_count}</b>.</p>"
-            )
+                f"allocation mode: <b>{final_mode_label}</b>. Active rows: <b>{len(active_ids)}</b>. "
+                f"Baseline equal slice: <b>{equal_allocation:.2f}</b>. Missing data rows: <b>{no_data_count}</b>. "
+                f"Rows excluded from combined equity: <b>{excluded_count}</b>.</p>"
+            ),
+        )
+        sync_portfolio_equity_view()
+        return
+    def on_portfolio_period_change(_attr: str, _old: object, _new: object) -> None:
+        clear_portfolio_analysis_outputs()
+        if portfolio_run_rows_by_id:
+            portfolio_status_div.text = "<p>Portfolio period changed. Run Portfolio again to refresh the equity curve.</p>"
+
+    def on_portfolio_allocation_change(_attr: str, _old: object, _new: object) -> None:
+        clear_portfolio_analysis_outputs()
+        if portfolio_run_rows_by_id or portfolio_curves_by_id:
+            on_run_portfolio()
+            return
+        portfolio_status_div.text = (
+            f"<p>Allocation mode set to <b>{portfolio_allocation_select.value}</b>. "
+            f"Run Portfolio to build the updated equity curve.</p>"
         )
 
-    def on_portfolio_config_change(_attr: str, _old: object, _new: object) -> None:
-        clear_portfolio_analysis_outputs()
+    def on_portfolio_selection(_attr: str, _old: object, _new: object) -> None:
+        nonlocal portfolio_preview_item_id
+        portfolio_preview_item_id = selected_portfolio_item_id()
+        sync_portfolio_equity_view()
+
+    def on_portfolio_table_action(_attr: str, _old: object, _new: object) -> None:
+        nonlocal portfolio_preview_item_id
+        item_ids = list(portfolio_table_action_source.data.get("item_id", []))
+        if not item_ids:
+            return
+        item_id = str(item_ids[0])
+        item = portfolio_items_by_id.get(item_id)
+        if item is None:
+            return
+        if item_id in portfolio_excluded_item_ids:
+            portfolio_excluded_item_ids.remove(item_id)
+            state_label = "included"
+        else:
+            portfolio_excluded_item_ids.add(item_id)
+            state_label = "excluded"
+        portfolio_preview_item_id = None
+        refresh_portfolio_table(
+            status_text=(
+                f"<p><b>{item.symbol_1}</b> / <b>{item.symbol_2}</b> is now <b>{state_label}</b> "
+                f"in current portfolio accounting. Single click previews only this row.</p>"
+            ),
+        )
+        sync_portfolio_equity_view()
 
     def _coerce_meta_datetime(value: object) -> datetime | None:
         if value in (None, ""):
@@ -4255,9 +4910,14 @@ if (!targets.length) {
                 f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
             )
 
-    def complete_optimization(result: DistanceOptimizationResult, mode_label: str, pair: PairSelection) -> None:
+    def complete_optimization(
+        result: DistanceOptimizationResult,
+        source_data: dict[str, list[object]],
+        mode_label: str,
+        pair: PairSelection,
+    ) -> None:
         nonlocal displayed_optimization_signature, optimization_summary_html, suppress_optimization_selection
-        state.optimization_source.data = optimization_results_to_source(result)
+        state.optimization_source.data = source_data
         state.optimization_source.selected.indices = []
         request_context = optimization_request_context or {}
         requested_started_at = request_context.get("started_at")
@@ -4299,105 +4959,72 @@ if (!targets.length) {
             f"<p>Evaluated {result.evaluated_trials} {mode_label} trials for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
             f"Best objective: {best.objective_score:.3f}, Net: {best.net_profit:.2f}, Max DD: {best.max_drawdown:.2f}.{range_label}</p>"
         )
-        optimization_status_div.text = optimization_summary_html
-        # UX contract:
-        # Auto-previewing the best optimizer row must use the current tester
-        # period for chart replay, exactly like a manual row click.
-        ran, trial_id, tester_period = apply_optimization_trial(0)
         suppress_optimization_selection = True
         try:
             state.optimization_source.selected.indices = [0]
         finally:
             suppress_optimization_selection = False
-        if ran:
+        if not render_optimization_trial_in_tester(0, selection_label="Best row"):
             optimization_status_div.text = (
                 f"{optimization_summary_html}"
-                f"<p>Rendered best trial <b>{trial_id}</b> on tester period "
-                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
+                f"<p>The best row is selected. Single-click copies parameters into tester and renders it on the current tester period.</p>"
             )
-        else:
-            optimization_status_div.text = (
-                f"{optimization_summary_html}"
-                f"<p>Best trial <b>{trial_id}</b> was selected, but the chart did not run on tester period "
-                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b> "
-                f"because aligned data is missing.</p>"
-            )
-
 
     def apply_backtest_result(*, period_override: tuple[datetime, datetime] | None = None) -> bool:
-        if algorithm_select.value != "distance":
-            return clear_backtest_outputs("<p>Only the first Distance tester slice is wired right now.</p>")
+        request, error_message = current_backtest_request(period_override=period_override)
+        if request is None:
+            return clear_backtest_outputs(error_message or "<p>Test request is invalid.</p>")
+        return apply_backtest_payload(run_tester_job(request))
 
-        pair = current_pair()
-        if pair is None:
-            return clear_backtest_outputs("<p>Refresh instruments and choose two different valid instruments first.</p>")
+    def begin_symbol_change_refresh_suppression() -> None:
+        nonlocal suppress_symbol_change_refresh
+        suppress_symbol_change_refresh += 1
 
-        if period_override is None:
-            started_at = _coerce_datetime(period_slider.value[0])
-            ended_at = _coerce_datetime(period_slider.value[1])
-        else:
-            started_at, ended_at = period_override
-        defaults = build_defaults()
-        params = build_distance_params()
-        result = run_distance_backtest(
-            broker=broker,
-            pair=pair,
-            timeframe=Timeframe(timeframe_select.value),
-            started_at=started_at,
-            ended_at=ended_at,
-            defaults=defaults,
-            params=params,
+    def end_symbol_change_refresh_suppression() -> None:
+        nonlocal suppress_symbol_change_refresh
+        suppress_symbol_change_refresh = max(0, suppress_symbol_change_refresh - 1)
+
+    def maybe_refresh_price_plots_for_symbol_change() -> None:
+        if suppress_symbol_change_refresh > 0:
+            return
+        if not (price_1_body.visible or price_2_body.visible):
+            return
+
+        request, _error_message = current_backtest_request()
+        if request is None:
+            return
+
+        pair = request["pair"]
+        timeframe = request["timeframe"]
+        started_at = request["started_at"]
+        ended_at = request["ended_at"]
+        assert isinstance(pair, PairSelection)
+        assert isinstance(timeframe, Timeframe)
+        assert isinstance(started_at, datetime)
+        assert isinstance(ended_at, datetime)
+
+        set_tester_context("tester_manual", context_started_at=started_at, context_ended_at=ended_at)
+        submit_tester_request(
+            request,
+            pending_message=(
+                f"<p>Refreshing tester charts for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
+                f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            ),
         )
-        if result.frame.is_empty():
-            return clear_backtest_outputs(
-                f"<p>No aligned parquet data found for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> "
-                f"on <b>{timeframe_select.value}</b> between "
-                f"<b>{started_at:%Y-%m-%d %H:%M}</b> and <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
-            )
-
-        sources = result_to_sources(result)
-        state.price_1_source.data = sources["price_1"]
-        state.price_2_source.data = sources["price_2"]
-        state.spread_source.data = sources["spread"]
-        state.zscore_source.data = sources["zscore"]
-        state.equity_source.data = sources["equity"]
-        state.trades_source.data = sources["trades"]
-        state.trade_markers_1.data = sources["markers_1"]
-        state.trade_markers_2.data = sources["markers_2"]
-        state.trade_segments_1.data = sources["segments_1"]
-        state.trade_segments_2.data = sources["segments_2"]
-        state.trades_source.selected.indices = []
-        clear_trade_highlights()
-        apply_zscore_diagnostics(result.frame, params)
-
-        x_values = [float(value) for value in sources["price_1"].get("x", [])]
-        state.shared_x_range.start = 0.0
-        state.shared_x_range.end = float(max(1, len(x_values) - 1))
-
-        rebalance_layout()
-        refresh_plot_ranges()
-        sync_optimization_cutoff_marker(test_started_at=started_at, test_ended_at=ended_at)
-        sync_optimization_train_overlay(test_started_at=started_at, test_ended_at=ended_at)
-
-        summary = result.summary
-        sync_equity_legend(str(summary['symbol_1']), str(summary['symbol_2']))
-        set_equity_summary_overlay(summary)
-        completed_at = datetime.now(UTC)
-        summary_div.text = (
-            f"<p>Distance test completed at <b>{completed_at:%Y-%m-%d %H:%M:%S} UTC</b> for "
-            f"<b>{summary['symbol_1']}</b> / <b>{summary['symbol_2']}</b> on <b>{timeframe_select.value}</b>. "
-            f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
-            f"Trades: <b>{int(summary.get('trades', 0) or 0)}</b>, Net: <b>{float(summary.get('net_pnl', 0.0) or 0.0):.2f}</b>.</p>"
-        )
-        return True
 
     def refresh_instruments() -> None:
+        sync_catalog_group_select_options()
         selected_group = group_select.value
         options = instrument_options_for_group(selected_group)
-        symbol_1_select.options = options
-        symbol_1_select.value = _preferred_symbol_1(options, symbol_1_select.value)
-        sync_symbol_2_filter(base_options=options, show_message=leg_2_filter_select.value != 'all_symbols')
+        begin_symbol_change_refresh_suppression()
+        try:
+            symbol_1_select.options = options
+            symbol_1_select.value = _preferred_symbol_1(options, symbol_1_select.value)
+            sync_symbol_2_filter(base_options=options, show_message=leg_2_filter_select.value != 'all_symbols')
+        finally:
+            end_symbol_change_refresh_suppression()
         sync_downloader_symbol_options(show_message=False)
+        sync_price_plot_labels()
         if leg_2_filter_select.value == 'all_symbols':
             visible_count = len([option for option in options if option != INSTRUMENT_PLACEHOLDER])
             summary_div.text = f"<p>Loaded {visible_count} instruments for group '{selected_group}'.</p>"
@@ -4407,15 +5034,23 @@ if (!targets.length) {
         on_optimization_config_change(_attr, _old, _new)
 
     def on_symbol_1_change(_attr: str, _old: object, _new: object) -> None:
-        sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
+        sync_price_plot_labels()
+        begin_symbol_change_refresh_suppression()
+        try:
+            sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
+        finally:
+            end_symbol_change_refresh_suppression()
         restore_saved_wfa_result(show_message=False)
         restore_saved_meta_result(show_message=False)
         on_optimization_config_change(_attr, _old, _new)
+        maybe_refresh_price_plots_for_symbol_change()
 
     def on_symbol_2_change(_attr: str, _old: object, _new: object) -> None:
+        sync_price_plot_labels()
         restore_saved_wfa_result(show_message=False)
         restore_saved_meta_result(show_message=False)
         on_optimization_config_change(_attr, _old, _new)
+        maybe_refresh_price_plots_for_symbol_change()
 
     def on_leg2_filter_change(_attr: str, _old: object, _new: object) -> None:
         sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
@@ -4486,8 +5121,15 @@ if (!targets.length) {
         refresh_plot_ranges()
 
     def on_range_change(_attr: str, _old: object, _new: object) -> None:
+        if suppress_shared_range_change:
+            return
         refresh_plot_ranges()
         update_gapless_x_axis()
+
+    def on_portfolio_range_change(_attr: str, _old: object, _new: object) -> None:
+        if suppress_portfolio_range_change:
+            return
+        refresh_portfolio_equity_ranges(reset_x_range=False)
 
     def on_trade_selection(_attr: str, _old: object, _new: object) -> None:
         indices = state.trades_source.selected.indices
@@ -4523,20 +5165,7 @@ if (!targets.length) {
             return
 
         index = indices[0]
-        ran, trial_id, tester_period = apply_optimization_trial(index)
-        if ran:
-            optimization_status_div.text = (
-                f"{optimization_summary_html}"
-                f"<p>Trial <b>{trial_id}</b> copied into tester inputs and executed on tester period "
-                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>.</p>"
-            )
-        else:
-            optimization_status_div.text = (
-                f"{optimization_summary_html}"
-                f"<p>Trial <b>{trial_id}</b> copied into tester inputs, but the backtest did not run on tester period "
-                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b> "
-                f"because aligned data is missing.</p>"
-            )
+        render_optimization_trial_in_tester(index, selection_label="Trial")
 
     def on_scan_selection(_attr: str, _old: object, _new: object) -> None:
         indices = state.scan_source.selected.indices
@@ -4551,10 +5180,14 @@ if (!targets.length) {
         symbol_1 = data["symbol_1"][index]
         symbol_2 = data["symbol_2"][index]
         options = _merge_symbol_options(list(symbol_1_select.options), symbol_1, symbol_2)
-        symbol_1_select.options = options
-        symbol_2_select.options = options
-        symbol_1_select.value = symbol_1
-        symbol_2_select.value = symbol_2
+        begin_symbol_change_refresh_suppression()
+        try:
+            symbol_1_select.options = options
+            symbol_2_select.options = options
+            symbol_1_select.value = symbol_1
+            symbol_2_select.value = symbol_2
+        finally:
+            end_symbol_change_refresh_suppression()
         set_tester_context("scan_row", context_started_at=tester_period[0], context_ended_at=tester_period[1])
         ran = apply_backtest_result(period_override=tester_period)
         if ran:
@@ -4570,10 +5203,29 @@ if (!targets.length) {
         tester_started_at = _coerce_datetime(period_slider.value[0])
         tester_ended_at = _coerce_datetime(period_slider.value[1])
         set_tester_context("tester_manual", context_started_at=tester_started_at, context_ended_at=tester_ended_at)
-        try:
-            apply_backtest_result()
-        except Exception as exc:  # pragma: no cover - runtime UI path
-            clear_backtest_outputs(f"<p>Test run failed: {exc}</p>")
+        request, error_message = current_backtest_request()
+        if request is None:
+            clear_backtest_outputs(error_message or "<p>Test request is invalid.</p>")
+            return
+
+        pair = request["pair"]
+        timeframe = request["timeframe"]
+        started_at = request["started_at"]
+        ended_at = request["ended_at"]
+        assert isinstance(pair, PairSelection)
+        assert isinstance(timeframe, Timeframe)
+        assert isinstance(started_at, datetime)
+        assert isinstance(ended_at, datetime)
+
+        submitted, busy_message = submit_tester_request(
+            request,
+            pending_message=(
+                f"<p>Running Distance test for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
+                f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            ),
+        )
+        if not submitted:
+            summary_div.text = busy_message or "<p>Distance test is already running.</p>"
 
     def run_optimization_job(
         mode_value: str,
@@ -4587,7 +5239,7 @@ if (!targets.length) {
         config: dict[str, float | int] | None,
         request_context: dict[str, object],
         cancel_check,
-    ) -> tuple[DistanceOptimizationResult, str, PairSelection, dict[str, object]]:
+    ) -> tuple[DistanceOptimizationResult, dict[str, list[object]], str, PairSelection, dict[str, object]]:
         optimization_progress["completed"] = 0
         optimization_progress["total"] = 0
         optimization_progress["stage"] = "Preparing optimization"
@@ -4606,7 +5258,7 @@ if (!targets.length) {
                 parallel_workers=optimizer_parallel_workers,
                 progress_callback=update_optimization_progress,
             )
-            return result, "genetic", pair, request_context
+            return result, optimization_results_to_source(result), "genetic", pair, request_context
         if mode_value != OptimizationMode.GRID.value:
             raise ValueError(f"Unsupported optimization mode: {mode_value}")
 
@@ -4623,7 +5275,7 @@ if (!targets.length) {
             parallel_workers=optimizer_parallel_workers,
             progress_callback=update_optimization_progress,
         )
-        return result, "grid", pair, request_context
+        return result, optimization_results_to_source(result), "grid", pair, request_context
 
     def clear_optimization_poll_callback() -> None:
         nonlocal optimization_poll_callback
@@ -4649,12 +5301,12 @@ if (!targets.length) {
         reset_optimization_button()
 
         try:
-            result, mode_label, pair, request_context = future.result()
+            result, source_data, mode_label, pair, request_context = future.result()
         except Exception as exc:  # pragma: no cover - runtime UI path
             optimization_status_div.text = f"<p>Optimization failed: {exc}</p>"
             return
         optimization_request_context = request_context
-        complete_optimization(result, mode_label, pair)
+        complete_optimization(result, source_data, mode_label, pair)
 
     def on_run_optimization() -> None:
         nonlocal optimization_future, optimization_poll_callback, optimization_request_context
@@ -5311,8 +5963,8 @@ if (!targets.length) {
     wfa_unit_select.on_change("value", on_wfa_config_change)
     wfa_lookback_input.on_change("value", on_wfa_config_change)
     wfa_test_input.on_change("value", on_wfa_config_change)
-    portfolio_period_slider.on_change("value", on_portfolio_config_change)
-    portfolio_allocation_select.on_change("value", on_portfolio_config_change)
+    portfolio_period_slider.on_change("value", on_portfolio_period_change)
+    portfolio_allocation_select.on_change("value", on_portfolio_allocation_change)
     for display_widget in [plot_font_size_input, plot_height_single_input, plot_height_two_input, plot_height_three_input, plot_height_four_input]:
         display_widget.on_change("value", on_display_settings_change)
         if "value_throttled" in display_widget.properties():
@@ -5334,12 +5986,16 @@ if (!targets.length) {
     portfolio_status_div.on_change("text", build_service_log_handler("portfolio"))
     state.shared_x_range.on_change("start", on_range_change)
     state.shared_x_range.on_change("end", on_range_change)
+    portfolio_equity_plot.x_range.on_change("start", on_portfolio_range_change)
+    portfolio_equity_plot.x_range.on_change("end", on_portfolio_range_change)
     state.trades_source.selected.on_change("indices", on_trade_selection)
     wfa_table_source.selected.on_change("indices", on_wfa_selection)
     meta_table_source.selected.on_change("indices", on_meta_selection)
     meta_ranking_source.selected.on_change("indices", on_meta_ranking_selection)
     state.optimization_source.selected.on_change("indices", on_optimization_selection)
     state.scan_source.selected.on_change("indices", on_scan_selection)
+    portfolio_table_source.selected.on_change("indices", on_portfolio_selection)
+    portfolio_table_action_source.on_change("data", on_portfolio_table_action)
     run_button.on_click(on_run_test)
     add_to_portfolio_button.on_click(on_add_to_portfolio)
     optimization_run_button.on_click(on_run_optimization)
@@ -5421,6 +6077,7 @@ if (!targets.length) {
     restore_saved_wfa_result(show_message=False)
     restore_saved_meta_result(show_message=False)
     ensure_nonempty_layout()
+    sync_price_plot_labels()
     apply_plot_display_settings()
     rebalance_layout()
     refresh_plot_ranges()

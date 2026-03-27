@@ -25,12 +25,30 @@ def test_resolve_symbols_filters_catalog_groups(monkeypatch) -> None:
         return pl.DataFrame(
             {
                 "symbol": ["EURUSD", "NAS100", "US2000"],
+                "path": [r"Forex\EURUSD", r"CFD\Indices\NAS100", r"CFD\Indices\US2000"],
                 "normalized_group": ["forex", "indices", "indices"],
             }
         )
 
     monkeypatch.setattr("tools.mt5_export_catalog_sync.read_instrument_catalog", fake_catalog)
 
-    result = resolve_symbols("bybit_mt5", [], all_symbols=True, groups=["indices"], limit=1)
+    result = resolve_symbols("bybit_mt5", [], all_symbols=True, groups=[r"CFD\Indices"], limit=1)
 
     assert result == ["NAS100"]
+
+
+def test_resolve_symbols_keeps_legacy_normalized_group_filter(monkeypatch) -> None:
+    def fake_catalog(_broker: str) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "symbol": ["EURUSD", "NAS100", "US2000"],
+                "path": [r"Forex\EURUSD", r"CFD\Indices\NAS100", r"CFD\Indices\US2000"],
+                "normalized_group": ["forex", "indices", "indices"],
+            }
+        )
+
+    monkeypatch.setattr("tools.mt5_export_catalog_sync.read_instrument_catalog", fake_catalog)
+
+    result = resolve_symbols("bybit_mt5", [], all_symbols=True, groups=["indices"], limit=None)
+
+    assert result == ["NAS100", "US2000"]

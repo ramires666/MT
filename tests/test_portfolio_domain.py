@@ -7,6 +7,9 @@ from domain.portfolio import (
     analyze_portfolio_curves,
     combine_portfolio_equity_curves,
     latest_portfolio_oos_started_at,
+    materialize_portfolio_backtest_allocations,
+    portfolio_strategy_started_at,
+    prepend_flat_equity_prefix,
     scale_defaults_for_portfolio_item,
 )
 from storage.portfolio_store import PortfolioItem
@@ -16,7 +19,9 @@ from domain.contracts import Timeframe
 def _item(
     *,
     item_id: str,
+    source_kind: str = "tester",
     oos_started_at: datetime | None = None,
+    context_started_at: datetime | None = None,
     initial_capital: float = 10_000.0,
     margin_budget_per_leg: float = 500.0,
 ) -> PortfolioItem:
@@ -24,7 +29,7 @@ def _item(
         item_id=item_id,
         item_signature=item_id,
         saved_at=datetime(2026, 3, 23, tzinfo=UTC),
-        source_kind="tester",
+        source_kind=source_kind,
         symbol_1="AUDUSD+",
         symbol_2="CADCHF+",
         timeframe=Timeframe.M15,
@@ -40,6 +45,7 @@ def _item(
         slippage_points=1.0,
         fee_mode="tight_spread",
         oos_started_at=oos_started_at,
+        context_started_at=context_started_at,
     )
 
 
@@ -61,6 +67,75 @@ def test_latest_portfolio_oos_started_at_returns_max_non_null() -> None:
     ]
 
     assert latest_portfolio_oos_started_at(items) == datetime(2026, 2, 1, tzinfo=UTC)
+
+
+def test_portfolio_strategy_started_at_uses_context_for_optimizer_rows() -> None:
+    item = _item(
+        item_id="a",
+        source_kind="optimization_row",
+        context_started_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+
+    assert portfolio_strategy_started_at(
+        item,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 3, 1, tzinfo=UTC),
+    ) == datetime(2026, 2, 1, tzinfo=UTC)
+
+
+def test_portfolio_strategy_started_at_keeps_manual_rows_on_selected_period() -> None:
+    item = _item(
+        item_id="a",
+        source_kind="tester_manual",
+        context_started_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+
+    assert portfolio_strategy_started_at(
+        item,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 3, 1, tzinfo=UTC),
+    ) == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_prepend_flat_equity_prefix_adds_flat_segment_before_context_start() -> None:
+    times, equities = prepend_flat_equity_prefix(
+        [datetime(2026, 2, 3, tzinfo=UTC)],
+        [10_250.0],
+        period_started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        strategy_started_at=datetime(2026, 2, 1, tzinfo=UTC),
+        initial_capital=10_000.0,
+    )
+
+    assert times == [
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 2, 1, tzinfo=UTC),
+        datetime(2026, 2, 3, tzinfo=UTC),
+    ]
+    assert equities == [10_000.0, 10_000.0, 10_250.0]
+
+
+def test_materialize_portfolio_backtest_allocations_uses_fallback_for_zero_rows() -> None:
+    allocations = materialize_portfolio_backtest_allocations(
+        ["a", "b", "c"],
+        allocation_capitals_by_id={"a": 2_500.0, "b": 0.0},
+        fallback_allocation_capital=1_250.0,
+    )
+
+    assert allocations == {
+        "a": 2_500.0,
+        "b": 1_250.0,
+        "c": 1_250.0,
+    }
+
+
+def test_materialize_portfolio_backtest_allocations_clamps_negative_values() -> None:
+    allocations = materialize_portfolio_backtest_allocations(
+        ["a"],
+        allocation_capitals_by_id={"a": -50.0},
+        fallback_allocation_capital=900.0,
+    )
+
+    assert allocations == {"a": 900.0}
 
 
 def test_combine_portfolio_equity_curves_forward_fills_each_pair() -> None:
@@ -99,6 +174,82 @@ def test_combine_portfolio_equity_curves_forward_fills_each_pair() -> None:
         datetime(2026, 1, 2, tzinfo=UTC),
     ]
     assert combined.get_column("equity").to_list() == [300.0, 300.0, 295.0]
+
+
+def test_combine_portfolio_equity_curves_respects_included_item_ids() -> None:
+    combined = combine_portfolio_equity_curves(
+        [
+            PortfolioCurve(
+                item_id="a",
+                symbol_1="AUDUSD+",
+                symbol_2="CADCHF+",
+                timeframe=Timeframe.M15.value,
+                initial_capital=100.0,
+                times=[
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    datetime(2026, 1, 2, tzinfo=UTC),
+                ],
+                equities=[100.0, 110.0],
+            ),
+            PortfolioCurve(
+                item_id="b",
+                symbol_1="NZDUSD+",
+                symbol_2="USDCHF+",
+                timeframe=Timeframe.M15.value,
+                initial_capital=200.0,
+                times=[
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    datetime(2026, 1, 2, tzinfo=UTC),
+                ],
+                equities=[200.0, 190.0],
+            ),
+        ],
+        included_item_ids={"b"},
+    )
+
+    assert combined.get_column("time").to_list() == [
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 2, tzinfo=UTC),
+    ]
+    assert combined.get_column("equity").to_list() == [200.0, 190.0]
+
+
+def test_combine_portfolio_equity_curves_scales_raw_curves_by_allocation() -> None:
+    combined = combine_portfolio_equity_curves(
+        [
+            PortfolioCurve(
+                item_id="a",
+                symbol_1="AUDUSD+",
+                symbol_2="CADCHF+",
+                timeframe=Timeframe.M15.value,
+                initial_capital=100.0,
+                times=[
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    datetime(2026, 1, 2, tzinfo=UTC),
+                ],
+                equities=[100.0, 110.0],
+            ),
+            PortfolioCurve(
+                item_id="b",
+                symbol_1="NZDUSD+",
+                symbol_2="USDCHF+",
+                timeframe=Timeframe.M15.value,
+                initial_capital=200.0,
+                times=[
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    datetime(2026, 1, 2, tzinfo=UTC),
+                ],
+                equities=[200.0, 190.0],
+            ),
+        ],
+        allocation_capitals_by_id={"a": 300.0, "b": 100.0},
+    )
+
+    assert combined.get_column("time").to_list() == [
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 2, tzinfo=UTC),
+    ]
+    assert combined.get_column("equity").to_list() == [400.0, 425.0]
 
 
 def test_analyze_portfolio_curves_returns_pairwise_corrs_and_weights() -> None:

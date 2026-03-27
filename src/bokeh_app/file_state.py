@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from math import isfinite
@@ -78,6 +79,13 @@ def _sanitize_spinner_value(model: Spinner, value: Any) -> Any:
     return normalized_int
 
 
+def _binding_value(binding: BrowserStateBinding) -> Any:
+    value = getattr(binding.model, binding.property_name)
+    if binding.property_name == 'value' and isinstance(binding.model, Spinner):
+        value = _sanitize_spinner_value(binding.model, value)
+    return value
+
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -136,12 +144,13 @@ class FileStateController:
     _loaded_state: dict[str, Any] = field(default_factory=dict, init=False)
     _persisting: bool = field(default=False, init=False)
     _persist_queued: bool = field(default=False, init=False)
+    _suspend_depth: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         _cleanup_temp_files(self.state_path)
         self.defaults = {
             binding.state_key: _serialize_value(
-                binding.default if binding.default is not None else getattr(binding.model, binding.property_name)
+                binding.default if binding.default is not None else _binding_value(binding)
             )
             for binding in self.bindings
         }
@@ -154,12 +163,12 @@ class FileStateController:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            binding.state_key: _serialize_value(getattr(binding.model, binding.property_name))
+            binding.state_key: _serialize_value(_binding_value(binding))
             for binding in self.bindings
         }
 
     def persist(self) -> None:
-        if self._restoring:
+        if self._restoring or self._suspend_depth > 0:
             return
         if self._persisting:
             self._persist_queued = True
@@ -195,10 +204,16 @@ class FileStateController:
             self.state_path.unlink()
         self._loaded_state = dict(self.defaults)
 
+    @contextmanager
+    def suspend(self):
+        self._suspend_depth += 1
+        try:
+            yield
+        finally:
+            self._suspend_depth = max(0, self._suspend_depth - 1)
+
     def _restore_binding(self, binding: BrowserStateBinding, state: dict[str, Any]) -> None:
         if binding.state_key not in state:
-            return
-        if binding.property_name == 'value' and isinstance(binding.model, Spinner) and has_fractional_step(getattr(binding.model, 'step', None)):
             return
         desired = state[binding.state_key]
         if binding.kind == 'range':

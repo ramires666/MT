@@ -7,6 +7,7 @@ from typing import Iterable, Sequence
 
 import polars as pl
 
+from domain.data.catalog_groups import filter_catalog_by_group
 from storage.catalog import read_instrument_catalog
 from storage.quotes import raw_partition_path
 from tools.mt5_terminal_export_sync import (
@@ -63,7 +64,8 @@ def resolve_symbols(
             raise ValueError('Either provide --symbol or enable --all-symbols')
         catalog = read_instrument_catalog(broker)
         if groups:
-            catalog = catalog.filter(pl.col('normalized_group').is_in(list(groups)))
+            for group in groups:
+                catalog = filter_catalog_by_group(catalog, group)
         symbols = catalog.get_column('symbol').sort().to_list() if not catalog.is_empty() else []
 
     if limit is not None:
