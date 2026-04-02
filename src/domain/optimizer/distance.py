@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import Executor
+from contextlib import nullcontext
 from dataclasses import replace
 from itertools import product
 from typing import Any, Iterable, Mapping
@@ -46,6 +48,7 @@ from domain.optimizer.distance_parallel import (
     evaluate_distance_tasks,
     is_cancelled as _is_cancelled,
 )
+from workers.executor import shared_process_pool
 
 
 def _evaluate_params(
@@ -89,6 +92,11 @@ def _evaluate_params(
         score_log_trades=float(metrics["score_log_trades"]),
         ulcer_index=float(metrics["ulcer_index"]),
         ulcer_performance=float(metrics["ulcer_performance"]),
+        cagr=float(metrics["cagr"]),
+        cagr_to_ulcer=float(metrics["cagr_to_ulcer"]),
+        r_squared=float(metrics["r_squared"]),
+        calmar=float(metrics["calmar"]),
+        beauty_score=float(metrics["beauty_score"]),
         trades=int(metrics.get("trades", 0) or 0),
         win_rate=float(metrics.get("win_rate", 0.0) or 0.0),
         lookback_bars=params.lookback_bars,
@@ -173,6 +181,7 @@ def _evaluate_params_parallel(
     cancel_check: CancellationCheck | None,
     progress_callback=None,
     progress_stage: str = "Grid search",
+    executor: Executor | None = None,
 ):
     return evaluate_distance_tasks(
         tasks=tasks,
@@ -192,6 +201,7 @@ def _evaluate_params_parallel(
         prepare_context_fn=_prepare_optimizer_context,
         progress_callback=progress_callback,
         progress_stage=progress_stage,
+        executor=executor,
     )
 
 
@@ -213,6 +223,7 @@ def _evaluate_candidate_tasks_parallel(
     progress_total: int = 0,
     progress_stage: str = "Genetic search",
     completed_offset: int = 0,
+    executor: Executor | None = None,
 ):
     return evaluate_candidate_distance_tasks(
         tasks=tasks,
@@ -234,6 +245,7 @@ def _evaluate_candidate_tasks_parallel(
         progress_total=progress_total,
         progress_stage=progress_stage,
         completed_offset=completed_offset,
+        executor=executor,
     )
 
 
@@ -277,55 +289,64 @@ def optimize_distance_grid_frame(
     cancel_check: CancellationCheck | None = None,
     parallel_workers: int | None = None,
     progress_callback=None,
+    parallel_executor: Executor | None = None,
 ) -> DistanceOptimizationResult:
-    _validate_objective_metric(objective_metric)
-    if isinstance(search_space, Mapping):
-        search_space = parse_distance_search_space(search_space)
-    task_items = list(enumerate(iter_distance_parameter_grid(search_space), start=1))
-    unique_tasks: list[tuple[int, DistanceParameters]] = []
-    signature_by_trial: dict[int, tuple[int, float, float, float | None]] = {}
-    first_seen: set[tuple[int, float, float, float | None]] = set()
-    for trial_id, params in task_items:
-        signature = _execution_signature(params)
-        signature_by_trial[int(trial_id)] = signature
-        if signature in first_seen:
-            continue
-        first_seen.add(signature)
-        unique_tasks.append((trial_id, params))
-    unique_rows, cancelled = _evaluate_params_parallel(
-        tasks=unique_tasks,
-        frame=frame,
-        pair=pair,
-        defaults=defaults,
-        objective_metric=objective_metric,
-        point_1=point_1,
-        point_2=point_2,
-        contract_size_1=contract_size_1,
-        contract_size_2=contract_size_2,
-        spec_1=spec_1,
-        spec_2=spec_2,
-        parallel_workers=parallel_workers,
-        cancel_check=cancel_check,
-        progress_callback=progress_callback,
+    managed_executor_context = (
+        shared_process_pool(parallel_workers)
+        if parallel_executor is None
+        else nullcontext(parallel_executor)
     )
-    unique_rows_by_signature = {
-        signature_by_trial[int(row.trial_id)]: row
-        for row in unique_rows
-    }
-    rows = [
-        _clone_row_for_params(row, trial_id=trial_id, params=params)
-        for trial_id, params in task_items
-        if (row := unique_rows_by_signature.get(signature_by_trial[int(trial_id)])) is not None
-    ]
-    rows = _sort_rows(rows)
-    return DistanceOptimizationResult(
-        objective_metric=objective_metric,
-        evaluated_trials=len(rows),
-        rows=rows,
-        best_trial_id=rows[0].trial_id if rows else None,
-        cancelled=cancelled,
-        failure_reason=None if rows or cancelled else "no_valid_parameter_combinations",
-    )
+    with managed_executor_context as managed_executor:
+        executor = parallel_executor or managed_executor
+        _validate_objective_metric(objective_metric)
+        if isinstance(search_space, Mapping):
+            search_space = parse_distance_search_space(search_space)
+        task_items = list(enumerate(iter_distance_parameter_grid(search_space), start=1))
+        unique_tasks: list[tuple[int, DistanceParameters]] = []
+        signature_by_trial: dict[int, tuple[int, float, float, float | None]] = {}
+        first_seen: set[tuple[int, float, float, float | None]] = set()
+        for trial_id, params in task_items:
+            signature = _execution_signature(params)
+            signature_by_trial[int(trial_id)] = signature
+            if signature in first_seen:
+                continue
+            first_seen.add(signature)
+            unique_tasks.append((trial_id, params))
+        unique_rows, cancelled = _evaluate_params_parallel(
+            tasks=unique_tasks,
+            frame=frame,
+            pair=pair,
+            defaults=defaults,
+            objective_metric=objective_metric,
+            point_1=point_1,
+            point_2=point_2,
+            contract_size_1=contract_size_1,
+            contract_size_2=contract_size_2,
+            spec_1=spec_1,
+            spec_2=spec_2,
+            parallel_workers=parallel_workers,
+            cancel_check=cancel_check,
+            progress_callback=progress_callback,
+            executor=executor,
+        )
+        unique_rows_by_signature = {
+            signature_by_trial[int(row.trial_id)]: row
+            for row in unique_rows
+        }
+        rows = [
+            _clone_row_for_params(row, trial_id=trial_id, params=params)
+            for trial_id, params in task_items
+            if (row := unique_rows_by_signature.get(signature_by_trial[int(trial_id)])) is not None
+        ]
+        rows = _sort_rows(rows)
+        return DistanceOptimizationResult(
+            objective_metric=objective_metric,
+            evaluated_trials=len(rows),
+            rows=rows,
+            best_trial_id=rows[0].trial_id if rows else None,
+            cancelled=cancelled,
+            failure_reason=None if rows or cancelled else "no_valid_parameter_combinations",
+        )
 
 
 def optimize_distance_genetic_frame(
@@ -344,103 +365,113 @@ def optimize_distance_genetic_frame(
     cancel_check: CancellationCheck | None = None,
     parallel_workers: int | None = None,
     progress_callback=None,
+    parallel_executor: Executor | None = None,
 ) -> DistanceOptimizationResult:
-    _validate_objective_metric(objective_metric)
-    if isinstance(search_space, Mapping):
-        search_space = parse_distance_search_space(search_space)
-    if not isinstance(config, DistanceGeneticConfig):
-        config = parse_distance_genetic_config(config)
+    managed_executor_context = (
+        shared_process_pool(parallel_workers)
+        if parallel_executor is None
+        else nullcontext(parallel_executor)
+    )
+    with managed_executor_context as managed_executor:
+        executor = parallel_executor or managed_executor
+        _validate_objective_metric(objective_metric)
+        if isinstance(search_space, Mapping):
+            search_space = parse_distance_search_space(search_space)
+        if not isinstance(config, DistanceGeneticConfig):
+            config = parse_distance_genetic_config(config)
 
-    rng = np.random.default_rng(config.random_seed)
-    cache: dict[Candidate, DistanceOptimizationRow] = {}
-    execution_cache: dict[tuple[int, float, float, float | None], DistanceOptimizationRow] = {}
-    next_trial_id = 1
-    cancelled = False
-    estimated_total = config.population_size * (config.generations + 1)
-    population = [_random_candidate(search_space, rng) for _ in range(config.population_size)]
-    _emit_progress(progress_callback, 0, estimated_total, "Genetic search")
-    for generation in range(config.generations):
-        if _is_cancelled(cancel_check):
-            cancelled = True
-            break
-        next_trial_id, cancelled = evaluate_candidates_into_cache(
-            population=population,
-            cache=cache,
-            next_trial_id=next_trial_id,
-            frame=frame,
-            pair=pair,
-            defaults=defaults,
-            search_space=search_space,
-            objective_metric=objective_metric,
-            point_1=point_1,
-            point_2=point_2,
-            contract_size_1=contract_size_1,
-            contract_size_2=contract_size_2,
-            spec_1=spec_1,
-            spec_2=spec_2,
-            parallel_workers=parallel_workers,
-            cancel_check=cancel_check,
-            evaluate_candidate_tasks_fn=_evaluate_candidate_tasks_parallel,
-            execution_cache=execution_cache,
-            progress_callback=progress_callback,
-            progress_stage=f"Generation {generation + 1}/{config.generations}",
-            progress_total=estimated_total,
-        )
-        if cancelled:
-            break
-
-        ranked_population = sorted(population, key=lambda candidate: cache[candidate].objective_score, reverse=True)
-        elites = ranked_population[: config.elite_count]
-        next_population = list(elites)
-        while len(next_population) < config.population_size:
+        rng = np.random.default_rng(config.random_seed)
+        cache: dict[Candidate, DistanceOptimizationRow] = {}
+        execution_cache: dict[tuple[int, float, float, float | None], DistanceOptimizationRow] = {}
+        next_trial_id = 1
+        cancelled = False
+        estimated_total = config.population_size * (config.generations + 1)
+        population = [_random_candidate(search_space, rng) for _ in range(config.population_size)]
+        _emit_progress(progress_callback, 0, estimated_total, "Genetic search")
+        for generation in range(config.generations):
             if _is_cancelled(cancel_check):
                 cancelled = True
                 break
-            parent_left = _tournament_select(ranked_population, cache, config, rng)
-            parent_right = _tournament_select(ranked_population, cache, config, rng)
-            child_left, child_right = _crossover_candidates(parent_left, parent_right, config, rng)
-            child_left = _mutate_candidate(child_left, search_space, config, rng)
-            next_population.append(child_left)
-            if len(next_population) < config.population_size:
-                next_population.append(_mutate_candidate(child_right, search_space, config, rng))
-        if cancelled:
-            break
-        population = next_population
+            next_trial_id, cancelled = evaluate_candidates_into_cache(
+                population=population,
+                cache=cache,
+                next_trial_id=next_trial_id,
+                frame=frame,
+                pair=pair,
+                defaults=defaults,
+                search_space=search_space,
+                objective_metric=objective_metric,
+                point_1=point_1,
+                point_2=point_2,
+                contract_size_1=contract_size_1,
+                contract_size_2=contract_size_2,
+                spec_1=spec_1,
+                spec_2=spec_2,
+                parallel_workers=parallel_workers,
+                cancel_check=cancel_check,
+                evaluate_candidate_tasks_fn=_evaluate_candidate_tasks_parallel,
+                execution_cache=execution_cache,
+                progress_callback=progress_callback,
+                progress_stage=f"Generation {generation + 1}/{config.generations}",
+                progress_total=estimated_total,
+                executor=executor,
+            )
+            if cancelled:
+                break
 
-    if not cancelled:
-        next_trial_id, cancelled = evaluate_candidates_into_cache(
-            population=population,
-            cache=cache,
-            next_trial_id=next_trial_id,
-            frame=frame,
-            pair=pair,
-            defaults=defaults,
-            search_space=search_space,
+            ranked_population = sorted(population, key=lambda candidate: cache[candidate].objective_score, reverse=True)
+            elites = ranked_population[: config.elite_count]
+            next_population = list(elites)
+            while len(next_population) < config.population_size:
+                if _is_cancelled(cancel_check):
+                    cancelled = True
+                    break
+                parent_left = _tournament_select(ranked_population, cache, config, rng)
+                parent_right = _tournament_select(ranked_population, cache, config, rng)
+                child_left, child_right = _crossover_candidates(parent_left, parent_right, config, rng)
+                child_left = _mutate_candidate(child_left, search_space, config, rng)
+                next_population.append(child_left)
+                if len(next_population) < config.population_size:
+                    next_population.append(_mutate_candidate(child_right, search_space, config, rng))
+            if cancelled:
+                break
+            population = next_population
+
+        if not cancelled:
+            next_trial_id, cancelled = evaluate_candidates_into_cache(
+                population=population,
+                cache=cache,
+                next_trial_id=next_trial_id,
+                frame=frame,
+                pair=pair,
+                defaults=defaults,
+                search_space=search_space,
+                objective_metric=objective_metric,
+                point_1=point_1,
+                point_2=point_2,
+                contract_size_1=contract_size_1,
+                contract_size_2=contract_size_2,
+                spec_1=spec_1,
+                spec_2=spec_2,
+                parallel_workers=parallel_workers,
+                cancel_check=cancel_check,
+                evaluate_candidate_tasks_fn=_evaluate_candidate_tasks_parallel,
+                execution_cache=execution_cache,
+                progress_callback=progress_callback,
+                progress_stage="Final population",
+                progress_total=estimated_total,
+                executor=executor,
+            )
+
+        rows = _sort_rows(list(cache.values()))
+        return DistanceOptimizationResult(
             objective_metric=objective_metric,
-            point_1=point_1,
-            point_2=point_2,
-            contract_size_1=contract_size_1,
-            contract_size_2=contract_size_2,
-            spec_1=spec_1,
-            spec_2=spec_2,
-            parallel_workers=parallel_workers,
-            cancel_check=cancel_check,
-            evaluate_candidate_tasks_fn=_evaluate_candidate_tasks_parallel,
-            execution_cache=execution_cache,
-            progress_callback=progress_callback,
-            progress_stage="Final population",
-            progress_total=estimated_total,
+            evaluated_trials=len(rows),
+            rows=rows,
+            best_trial_id=rows[0].trial_id if rows else None,
+            cancelled=cancelled,
+            failure_reason=None if rows or cancelled else "no_valid_parameter_combinations",
         )
-
-    rows = _sort_rows(list(cache.values()))
-    return DistanceOptimizationResult(
-        objective_metric=objective_metric,
-        evaluated_trials=len(rows),
-        rows=rows,
-        best_trial_id=rows[0].trial_id if rows else None,
-        cancelled=cancelled,
-        failure_reason=None if rows or cancelled else "no_valid_parameter_combinations",
-    )
 
 
 def _optimize_with_loaded_frame(

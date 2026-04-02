@@ -100,6 +100,34 @@ def test_file_state_restores_select_after_options_change() -> None:
             state_path.unlink()
 
 
+def test_file_state_restores_tuple_select_after_options_change() -> None:
+    state_path = Path('tests/.tmp_bokeh_file_state_tuple_options.json')
+    if state_path.exists():
+        state_path.unlink()
+    try:
+        initial_select = Select(value='NAS100', options=[('US2000', 'US2000, US 2000'), ('NAS100', 'NAS100, Nasdaq 100')])
+        initial_bindings = [
+            BrowserStateBinding('symbol_1', initial_select, kind='select', restore_on_options_change=True),
+        ]
+        initial_controller = FileStateController(state_path, initial_bindings)
+        initial_controller.persist()
+
+        delayed_select = Select(value='US2000', options=[('US2000', 'US2000, US 2000')])
+        delayed_bindings = [
+            BrowserStateBinding('symbol_1', delayed_select, kind='select', restore_on_options_change=True),
+        ]
+        delayed_controller = FileStateController(state_path, delayed_bindings)
+        delayed_controller.restore()
+        delayed_controller.install_model_watchers()
+        assert delayed_select.value == 'US2000'
+
+        delayed_select.options = [('US2000', 'US2000, US 2000'), ('NAS100', 'NAS100, Nasdaq 100')]
+        assert delayed_select.value == 'NAS100'
+    finally:
+        if state_path.exists():
+            state_path.unlink()
+
+
 def test_file_state_persist_handles_reentrant_calls(monkeypatch) -> None:
     state_path = Path('tests/.tmp_bokeh_file_state_reentrant.json')
     if state_path.exists():

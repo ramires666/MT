@@ -70,6 +70,9 @@ class JohansenUniverseScanResult:
     summary: JohansenUniverseScanSummary
     rows: list[JohansenUniverseScanRow]
     universe_symbols: list[str]
+    cancelled: bool = False
 
 
 ProgressCallback = Callable[[int, int, str], None]
+PartialResultCallback = Callable[[JohansenUniverseScanResult], None]
+CancellationCheck = Callable[[], bool]

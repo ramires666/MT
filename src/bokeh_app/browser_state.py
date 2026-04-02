@@ -50,6 +50,20 @@ function writeState(state) {{
     console.warn("Failed to persist browser state", error);
   }}
 }}
+function selectOptionValues(options) {{
+  return (options || []).map((item) => {{
+    if (typeof item === "string") {{
+      return item;
+    }}
+    if (Array.isArray(item)) {{
+      return item.length > 0 ? item[0] : null;
+    }}
+    if (item != null && typeof item === "object" && "value" in item) {{
+      return item.value;
+    }}
+    return null;
+  }}).filter((value) => typeof value === "string" && value.length > 0);
+}}
 """
 
 
@@ -80,7 +94,7 @@ const desired = state[{json.dumps(state_key)}];
 if (desired == null) {{
   return;
 }}
-const options = (model.options || []).map((item) => typeof item === "string" ? item : item.value);
+const options = selectOptionValues(model.options || []);
 if (options.includes(desired) && model.value !== desired) {{
   model.value = desired;
 }}
@@ -98,7 +112,7 @@ def _restore_assignment(arg_name: str, binding: BrowserStateBinding) -> str:
   if (desired == null) {{
     return;
   }}
-  const options = ({arg_name}.options || []).map((item) => typeof item === "string" ? item : item.value);
+  const options = selectOptionValues({arg_name}.options || []);
   if (options.includes(desired)) {{
     {arg_name}.{property_name} = desired;
   }}

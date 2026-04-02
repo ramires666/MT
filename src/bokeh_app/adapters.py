@@ -8,7 +8,7 @@ import polars as pl
 
 from domain.backtest.distance import DistanceBacktestResult
 from domain.optimizer.distance import DistanceOptimizationResult
-from domain.scan.johansen import JohansenUniverseScanResult
+from domain.scan import JohansenUniverseScanResult, OptimizerGridScanResult
 
 
 def empty_backtest_sources() -> dict[str, dict[str, list[Any]]]:
@@ -380,6 +380,21 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         "k_ratio_display": [],
         "k_ratio_bg": [],
         "score_log_trades": [],
+        "cagr": [],
+        "cagr_display": [],
+        "cagr_bg": [],
+        "cagr_to_ulcer": [],
+        "cagr_to_ulcer_display": [],
+        "cagr_to_ulcer_bg": [],
+        "r_squared": [],
+        "r_squared_display": [],
+        "r_squared_bg": [],
+        "calmar": [],
+        "calmar_display": [],
+        "calmar_bg": [],
+        "beauty_score": [],
+        "beauty_score_display": [],
+        "beauty_score_bg": [],
         "ulcer_index": [],
         "ulcer_index_display": [],
         "ulcer_index_bg": [],
@@ -408,6 +423,11 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         "omega_ratio": [],
         "k_ratio": [],
         "score_log_trades": [],
+        "cagr": [],
+        "cagr_to_ulcer": [],
+        "r_squared": [],
+        "calmar": [],
+        "beauty_score": [],
         "ulcer_index": [],
         "ulcer_performance": [],
     }
@@ -428,6 +448,16 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         rows["k_ratio"].append(row.k_ratio)
         rows["k_ratio_display"].append(f"{float(row.k_ratio):.3f}")
         rows["score_log_trades"].append(row.score_log_trades)
+        rows["cagr"].append(row.cagr)
+        rows["cagr_display"].append(f"{float(row.cagr):.4f}")
+        rows["cagr_to_ulcer"].append(row.cagr_to_ulcer)
+        rows["cagr_to_ulcer_display"].append(f"{float(row.cagr_to_ulcer):.4f}")
+        rows["r_squared"].append(row.r_squared)
+        rows["r_squared_display"].append(f"{float(row.r_squared):.4f}")
+        rows["calmar"].append(row.calmar)
+        rows["calmar_display"].append(f"{float(row.calmar):.4f}")
+        rows["beauty_score"].append(row.beauty_score)
+        rows["beauty_score_display"].append(f"{float(row.beauty_score):.4f}")
         rows["ulcer_index"].append(row.ulcer_index)
         rows["ulcer_index_display"].append(f"{float(row.ulcer_index):.4f}")
         rows["ulcer_performance"].append(row.ulcer_performance)
@@ -452,6 +482,11 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         metric_values["omega_ratio"].append(row.omega_ratio)
         metric_values["k_ratio"].append(row.k_ratio)
         metric_values["score_log_trades"].append(row.score_log_trades)
+        metric_values["cagr"].append(row.cagr)
+        metric_values["cagr_to_ulcer"].append(row.cagr_to_ulcer)
+        metric_values["r_squared"].append(row.r_squared)
+        metric_values["calmar"].append(row.calmar)
+        metric_values["beauty_score"].append(row.beauty_score)
         metric_values["ulcer_index"].append(row.ulcer_index)
         metric_values["ulcer_performance"].append(row.ulcer_performance)
 
@@ -461,9 +496,44 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
     rows["pnl_to_maxdd_bg"] = _soft_metric_backgrounds(metric_values["pnl_to_maxdd"], higher_is_better=True)
     rows["omega_ratio_bg"] = _soft_metric_backgrounds(metric_values["omega_ratio"], higher_is_better=True)
     rows["k_ratio_bg"] = _soft_metric_backgrounds(metric_values["k_ratio"], higher_is_better=True)
+    rows["cagr_bg"] = _soft_metric_backgrounds(metric_values["cagr"], higher_is_better=True)
+    rows["cagr_to_ulcer_bg"] = _soft_metric_backgrounds(metric_values["cagr_to_ulcer"], higher_is_better=True)
+    rows["r_squared_bg"] = _soft_metric_backgrounds(metric_values["r_squared"], higher_is_better=True)
+    rows["calmar_bg"] = _soft_metric_backgrounds(metric_values["calmar"], higher_is_better=True)
+    rows["beauty_score_bg"] = _soft_metric_backgrounds(metric_values["beauty_score"], higher_is_better=True)
     rows["ulcer_index_bg"] = _soft_metric_backgrounds(metric_values["ulcer_index"], higher_is_better=False)
     rows["ulcer_performance_bg"] = _soft_metric_backgrounds(metric_values["ulcer_performance"], higher_is_better=True)
     return rows
+
+
+def optimizer_scan_results_to_source(result: OptimizerGridScanResult) -> dict[str, list[Any]]:
+    optimization_rows = [row.optimization_row for row in result.rows]
+    objective_metric = optimization_rows[0].objective_metric if optimization_rows else "net_profit"
+    optimization_source = optimization_results_to_source(
+        DistanceOptimizationResult(
+            objective_metric=objective_metric,
+            evaluated_trials=len(optimization_rows),
+            rows=optimization_rows,
+            best_trial_id=optimization_rows[0].trial_id if optimization_rows else None,
+            cancelled=result.cancelled,
+            failure_reason=result.failure_reason,
+        )
+    )
+    source = {
+        "global_rank": [index for index in range(1, len(result.rows) + 1)],
+        "pair_rank": [int(row.pair_rank) for row in result.rows],
+        "universe_scope": [str(row.universe_scope) for row in result.rows],
+        "symbol_1": [str(row.symbol_1) for row in result.rows],
+        "symbol_2": [str(row.symbol_2) for row in result.rows],
+        "timeframe": [str(row.timeframe) for row in result.rows],
+        "initial_capital": [float(row.initial_capital) for row in result.rows],
+        "leverage": [float(row.leverage) for row in result.rows],
+        "margin_budget_per_leg": [float(row.margin_budget_per_leg) for row in result.rows],
+        "slippage_points": [float(row.slippage_points) for row in result.rows],
+        "fee_mode": [str(row.fee_mode) for row in result.rows],
+    }
+    source.update(optimization_source)
+    return source
 
 
 def scan_results_to_source(result: JohansenUniverseScanResult, *, passed_only: bool = False) -> dict[str, list[Any]]:

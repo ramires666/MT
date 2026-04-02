@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import polars as pl
@@ -349,3 +350,93 @@ def test_distance_genetic_uses_fixed_bollinger_value_from_search_space(monkeypat
     assert result.rows
     assert call_count == 1
     assert {row.bollinger_k for row in result.rows} == {1.5}
+
+
+def test_distance_genetic_reuses_parallel_executor_across_generations(monkeypatch) -> None:
+    created = 0
+
+    def fake_build_process_pool(max_workers=None):
+        nonlocal created
+        created += 1
+        return ThreadPoolExecutor(max_workers=max_workers)
+
+    monkeypatch.setattr("workers.executor.build_process_pool", fake_build_process_pool)
+
+    result = distance_module.optimize_distance_genetic_frame(
+        frame=_sample_pair_frame(),
+        pair=PairSelection(symbol_1="US2000", symbol_2="NAS100"),
+        defaults=StrategyDefaults(),
+        search_space=parse_distance_search_space(
+            {
+                "lookback_bars": [3, 4, 5],
+                "entry_z": [1.0, 1.5, 2.0],
+                "exit_z": [0.2, 0.5],
+                "stop_z": [3.0, 3.5],
+                "bollinger_k": [2.0],
+            }
+        ),
+        objective_metric="net_profit",
+        point_1=0.01,
+        point_2=0.01,
+        contract_size_1=1.0,
+        contract_size_2=1.0,
+        parallel_workers=2,
+        config=parse_distance_genetic_config(
+            {
+                "population_size": 8,
+                "generations": 4,
+                "elite_count": 2,
+                "mutation_rate": 0.20,
+                "random_seed": 11,
+            }
+        ),
+    )
+
+    assert result.rows
+    assert created == 1
+
+
+def test_distance_genetic_uses_supplied_parallel_executor_without_creating_extra_pool(monkeypatch) -> None:
+    created = 0
+
+    def fake_build_process_pool(max_workers=None):
+        nonlocal created
+        created += 1
+        return ThreadPoolExecutor(max_workers=max_workers)
+
+    monkeypatch.setattr("workers.executor.build_process_pool", fake_build_process_pool)
+
+    with ThreadPoolExecutor(max_workers=2) as supplied_executor:
+        result = distance_module.optimize_distance_genetic_frame(
+            frame=_sample_pair_frame(),
+            pair=PairSelection(symbol_1="US2000", symbol_2="NAS100"),
+            defaults=StrategyDefaults(),
+            search_space=parse_distance_search_space(
+                {
+                    "lookback_bars": [3, 4, 5],
+                    "entry_z": [1.0, 1.5, 2.0],
+                    "exit_z": [0.2, 0.5],
+                    "stop_z": [3.0, 3.5],
+                    "bollinger_k": [2.0],
+                }
+            ),
+            objective_metric="net_profit",
+            point_1=0.01,
+            point_2=0.01,
+            contract_size_1=1.0,
+            contract_size_2=1.0,
+            parallel_workers=2,
+            config=parse_distance_genetic_config(
+                {
+                    "population_size": 8,
+                    "generations": 4,
+                    "elite_count": 2,
+                    "mutation_rate": 0.20,
+                    "random_seed": 11,
+                }
+            ),
+            parallel_executor=supplied_executor,
+        )
+
+    assert result.rows
+    assert created == 0

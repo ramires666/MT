@@ -6,8 +6,10 @@ from domain.portfolio import (
     PortfolioCurve,
     analyze_portfolio_curves,
     combine_portfolio_equity_curves,
+    summarize_portfolio_equity_series,
     latest_portfolio_oos_started_at,
     materialize_portfolio_backtest_allocations,
+    portfolio_analysis_window,
     portfolio_strategy_started_at,
     prepend_flat_equity_prefix,
     scale_defaults_for_portfolio_item,
@@ -95,6 +97,42 @@ def test_portfolio_strategy_started_at_keeps_manual_rows_on_selected_period() ->
         started_at=datetime(2026, 1, 1, tzinfo=UTC),
         ended_at=datetime(2026, 3, 1, tzinfo=UTC),
     ) == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_portfolio_analysis_window_clips_context_rows_to_in_sample_before_oos() -> None:
+    item = _item(
+        item_id="a",
+        source_kind="optimization_row",
+        oos_started_at=datetime(2026, 2, 15, tzinfo=UTC),
+        context_started_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+
+    assert portfolio_analysis_window(
+        item,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 3, 1, tzinfo=UTC),
+    ) == (
+        datetime(2026, 2, 1, tzinfo=UTC),
+        datetime(2026, 2, 15, tzinfo=UTC),
+    )
+
+
+def test_portfolio_analysis_window_uses_pre_oos_history_for_meta_fold_rows() -> None:
+    item = _item(
+        item_id="a",
+        source_kind="meta_selected_fold",
+        oos_started_at=datetime(2026, 2, 15, tzinfo=UTC),
+        context_started_at=datetime(2026, 2, 15, tzinfo=UTC),
+    )
+
+    assert portfolio_analysis_window(
+        item,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 3, 1, tzinfo=UTC),
+    ) == (
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 2, 15, tzinfo=UTC),
+    )
 
 
 def test_prepend_flat_equity_prefix_adds_flat_segment_before_context_start() -> None:
@@ -250,6 +288,77 @@ def test_combine_portfolio_equity_curves_scales_raw_curves_by_allocation() -> No
         datetime(2026, 1, 2, tzinfo=UTC),
     ]
     assert combined.get_column("equity").to_list() == [400.0, 425.0]
+
+
+def test_combine_portfolio_equity_curves_aggregates_risk_load_and_open_positions() -> None:
+    combined = combine_portfolio_equity_curves(
+        [
+            PortfolioCurve(
+                item_id="a",
+                symbol_1="AUDUSD+",
+                symbol_2="CADCHF+",
+                timeframe=Timeframe.M15.value,
+                initial_capital=100.0,
+                times=[
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    datetime(2026, 1, 2, tzinfo=UTC),
+                ],
+                equities=[100.0, 95.0],
+                unrealized_drawdowns=[0.0, -5.0],
+                capital_loads=[0.0, 20.0],
+                open_positions=[0, 1],
+            ),
+            PortfolioCurve(
+                item_id="b",
+                symbol_1="NZDUSD+",
+                symbol_2="USDCHF+",
+                timeframe=Timeframe.M15.value,
+                initial_capital=200.0,
+                times=[
+                    datetime(2026, 1, 1, tzinfo=UTC),
+                    datetime(2026, 1, 2, tzinfo=UTC),
+                ],
+                equities=[200.0, 190.0],
+                unrealized_drawdowns=[0.0, -10.0],
+                capital_loads=[0.0, 40.0],
+                open_positions=[0, 1],
+            ),
+        ]
+    )
+
+    assert combined.get_column("equity").to_list() == [300.0, 285.0]
+    assert combined.get_column("unrealized_drawdown").to_list() == [0.0, -15.0]
+    assert combined.get_column("capital_load").to_list() == [0.0, 60.0]
+    assert combined.get_column("open_positions").to_list() == [0, 2]
+
+
+def test_summarize_portfolio_equity_series_reports_combined_metrics() -> None:
+    summary = summarize_portfolio_equity_series(
+        times=[
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 2, tzinfo=UTC),
+            datetime(2026, 1, 3, tzinfo=UTC),
+        ],
+        equities=[1_000.0, 980.0, 1_050.0],
+        unrealized_drawdowns=[0.0, -30.0, 0.0],
+        capital_loads=[0.0, 200.0, 100.0],
+        open_positions=[0, 2, 1],
+        trades_count=7,
+    )
+
+    assert summary.initial_capital == 1_000.0
+    assert summary.net_profit == 50.0
+    assert summary.ending_equity == 1_050.0
+    assert summary.max_drawdown == 20.0
+    assert summary.trades == 7
+    assert summary.max_unrealized_drawdown == 30.0
+    assert summary.avg_unrealized_drawdown == 30.0
+    assert summary.max_capital_load == 200.0
+    assert summary.avg_capital_load == 150.0
+    assert summary.max_capital_load_pct == 0.2
+    assert summary.avg_capital_load_pct == 0.15
+    assert summary.max_open_positions == 2
+    assert summary.avg_open_positions == 1.5
 
 
 def test_analyze_portfolio_curves_returns_pairwise_corrs_and_weights() -> None:

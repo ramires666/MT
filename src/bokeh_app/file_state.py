@@ -43,7 +43,21 @@ def _deserialize_range_value(value: Any) -> Any:
 
 def _select_options(model: Model) -> list[str]:
     options = getattr(model, 'options', None) or []
-    return [item if isinstance(item, str) else str(getattr(item, 'value', item.get('value'))) for item in options]
+    values: list[str] = []
+    for item in options:
+        if isinstance(item, str):
+            values.append(item)
+            continue
+        if isinstance(item, (tuple, list)) and item:
+            values.append(str(item[0]))
+            continue
+        if isinstance(item, dict) and 'value' in item:
+            values.append(str(item['value']))
+            continue
+        value = getattr(item, 'value', None)
+        if value is not None:
+            values.append(str(value))
+    return values
 
 
 def _sanitize_spinner_value(model: Spinner, value: Any) -> Any:

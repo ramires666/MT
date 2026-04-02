@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 import json
 from html import unescape
+from itertools import combinations
 from math import ceil, floor
 import os
 import re
 from pathlib import Path
 from threading import Event
+from time import monotonic
+from typing import Sequence
 
 import polars as pl
+from bokeh.core.property.descriptors import UnsetValueError
 from bokeh.events import DocumentReady, MouseLeave, MouseMove
 from bokeh.layouts import column, row
 from bokeh.models import (
@@ -26,6 +31,7 @@ from bokeh.models import (
     Div,
     CustomJS,
     HTMLTemplateFormatter,
+    HoverTool,
     Label,
     LinearAxis,
     NumberFormatter,
@@ -46,6 +52,7 @@ from bokeh.transform import factor_cmap
 from app_config import get_settings
 from bokeh_app.adapters import (
     empty_backtest_sources,
+    optimizer_scan_results_to_source,
     optimization_results_to_source,
     result_to_padded_sources,
     result_to_sources,
@@ -54,6 +61,7 @@ from bokeh_app.adapters import (
 from bokeh_app.browser_state import BrowserStateBinding
 from bokeh_app.file_state import FileStateController
 from bokeh_app.numeric_inputs import normalize_fractional_value
+from bokeh_app.scanner_estimate import estimate_scanner_runtime_seconds, scanner_pair_count
 from bokeh_app.state import AppState
 from bokeh_app.table_export import export_table_to_xlsx, metadata_rows_from_mapping
 from bokeh_app.view_utils import (
@@ -62,6 +70,7 @@ from bokeh_app.view_utils import (
     compute_relative_plot_height,
     compute_series_bounds,
     display_symbol_label,
+    sync_toggle_button_types,
 )
 from bokeh_app.zscore_diagnostics import (
     build_zscore_diagnostics,
@@ -84,40 +93,65 @@ from domain.data.co_movers import (
     co_mover_group_labels_for_symbol,
     co_mover_symbols_for_symbol,
 )
-from domain.data.catalog_groups import ALL_GROUP_OPTION, filter_catalog_by_group, list_mt5_group_options
+from domain.data.catalog_groups import (
+    ALL_GROUP_OPTION,
+    COINTEGRATION_CANDIDATES_GROUP,
+    cointegration_candidate_pair_keys,
+    cointegration_candidate_partner_symbols,
+    cointegration_candidate_signature,
+    filter_catalog_by_group,
+    is_cointegration_candidates_group,
+    list_mt5_group_options,
+)
 from domain.data.io import load_instrument_catalog_frame
 from domain.optimizer import DistanceOptimizationResult, OBJECTIVE_METRICS, count_distance_parameter_grid, optimize_distance_genetic, optimize_distance_grid
+from domain.scan import OptimizerGridScanResult, combine_optimizer_grid_scan_results, resolve_scan_symbols, scan_universe_optimizer_grid
 from domain.scan.johansen import JohansenScanParameters, JohansenUniverseScanResult, scan_universe_johansen
 from domain.wfa import run_distance_genetic_wfa
+from domain.wfa_windowing import BAR_MINUTES
 from domain.wfa_serialization import serialize_time
-from domain.meta_selector import DEFAULT_META_TARGET, SUPPORTED_META_MODELS, load_saved_meta_selector_result, run_meta_selector
-from domain.meta_selector_ml import normalized_model_config
 from domain.portfolio import (
     PortfolioAllocationSuggestionRow,
     PortfolioCorrelationRow,
     PortfolioCurve,
+    PortfolioEquitySummary,
     PortfolioRunRow,
     analyze_portfolio_curves,
     combine_portfolio_equity_curves,
+    derive_portfolio_curve_risk_series,
     latest_portfolio_oos_started_at,
     materialize_portfolio_backtest_allocations,
+    portfolio_analysis_window,
+    prepend_constant_series_prefix,
     portfolio_strategy_started_at,
     prepend_flat_equity_prefix,
     scale_defaults_for_portfolio_item,
+    summarize_portfolio_equity_series,
 )
 from storage.paths import ui_state_path
 from storage.portfolio_store import build_portfolio_item, load_portfolio_items, remove_portfolio_items, upsert_portfolio_item
 from tools.mt5_export_catalog_sync import build_jobs, chunked, resolve_symbols, symbol_partitions_exist
-from tools.mt5_terminal_export_sync import decode_exports, default_common_root, read_export_statuses, run_terminal_export, write_job_manifest, write_startup_config
+from tools.mt5_terminal_export_sync import coerce_platform_path, decode_exports, default_common_root, read_export_statuses, run_terminal_export, write_job_manifest, write_startup_config
 from storage.scan_results import (
     COINTEGRATION_KIND_OPTIONS,
+    list_saved_scan_runs,
     load_latest_saved_scan_result,
+    load_saved_scan_result_by_summary_path,
     partner_symbols_from_snapshot,
     persist_johansen_scan_result,
+    SavedScanSnapshot,
+    snapshot_to_johansen_result,
+)
+from storage.scanner_results import (
+    build_optimizer_scanner_request_signature,
+    load_optimizer_scanner_snapshot,
+    persist_optimizer_scanner_snapshot,
+    scanner_scope_label,
 )
 from storage.wfa_results import load_wfa_run_snapshot
 
 INSTRUMENT_PLACEHOLDER = "-- refresh from MT5 --"
+SCANNER_ALL_PAIRS_OPTION = "__all_pairs__"
 GROUP_OPTIONS = [ALL_GROUP_OPTION]
 TIMEFRAME_OPTIONS = [item.value for item in Timeframe]
 UNIT_ROOT_TEST_OPTIONS = [item.value for item in UnitRootTest]
@@ -134,7 +168,28 @@ DOWNLOAD_SCOPE_OPTIONS = ["symbol", "group"]
 DOWNLOAD_POLICY_OPTIONS = ["missing_only", "force"]
 WFA_UNIT_OPTIONS = [item.value for item in WfaWindowUnit]
 PORTFOLIO_ALLOCATION_OPTIONS = ["equal_weight", "diversified_risk"]
+SUPPORTED_META_MODELS = ("decision_tree", "random_forest", "xgboost")
+DEFAULT_META_TARGET = "test_score_log_trades"
 DEFAULT_MT5_TERMINAL_PATH = r"C:\Program Files\Bybit MT5 Terminal\terminal64.exe"
+SymbolSelectOption = str | tuple[str, str]
+
+
+def _option_value(option: SymbolSelectOption) -> str:
+    if isinstance(option, str):
+        return option
+    return str(option[0])
+
+
+def _clone_select_options(options: Sequence[SymbolSelectOption]) -> list[SymbolSelectOption]:
+    cloned: list[SymbolSelectOption] = []
+    for option in options:
+        if isinstance(option, str):
+            cloned.append(option)
+        else:
+            cloned.append((str(option[0]), str(option[1])))
+    return cloned
+
+
 def _build_figure(title: str, shared_x_range: Range1d, ylabel: str, height: int) -> figure:
     plot = figure(
         title=title,
@@ -201,6 +256,38 @@ def _build_equity_summary_columns(summary: dict[str, float | int | str]) -> list
     return ["\n".join(column) for column in columns]
 
 
+def _format_portfolio_metrics_line(summary: PortfolioEquitySummary | None, *, label: str) -> str:
+    if summary is None:
+        return (
+            "<p>Run <b>Portfolio</b> or <b>Analyze Portfolio</b> to calculate per-row metrics, "
+            "combined equity and portfolio risk overlays.</p>"
+        )
+    initial_capital = float(summary.initial_capital)
+    peak_equity = float(summary.peak_equity)
+    net_pct = (float(summary.net_profit) / initial_capital * 100.0) if abs(initial_capital) > 1e-12 else 0.0
+    max_dd_pct = (float(summary.max_drawdown) / peak_equity * 100.0) if abs(peak_equity) > 1e-12 else 0.0
+    return (
+        "<p style='margin:0 0 2px 0; white-space:nowrap; overflow-x:auto;'>"
+        f"<b>{label}</b> | "
+        f"Cap: <b>{initial_capital:.2f}</b> | "
+        f"Net: <b>{float(summary.net_profit):.2f} ({net_pct:.1f}%)</b> | "
+        f"Ending: <b>{float(summary.ending_equity):.2f}</b> | "
+        f"Peak: <b>{peak_equity:.2f}</b> | "
+        f"Max DD: <b>{float(summary.max_drawdown):.2f} ({max_dd_pct:.1f}%)</b> | "
+        f"Trades: <b>{int(summary.trades)}</b> | "
+        f"CAGR: <b>{float(summary.cagr):.4f}</b> | "
+        f"C/U: <b>{float(summary.cagr_to_ulcer):.4f}</b> | "
+        f"R^2: <b>{float(summary.r_squared):.4f}</b> | "
+        f"Calmar: <b>{float(summary.calmar):.4f}</b> | "
+        f"Beauty: <b>{float(summary.beauty_score):.4f}</b> | "
+        f"Unreal DD max/avg: <b>{float(summary.max_unrealized_drawdown):.2f} / {float(summary.avg_unrealized_drawdown):.2f}</b> | "
+        f"Load max/avg: <b>{float(summary.max_capital_load):.2f} ({float(summary.max_capital_load_pct) * 100.0:.1f}%) / "
+        f"{float(summary.avg_capital_load):.2f} ({float(summary.avg_capital_load_pct) * 100.0:.1f}%)</b> | "
+        f"Open max/avg: <b>{int(summary.max_open_positions)} / {float(summary.avg_open_positions):.2f}</b>"
+        "</p>"
+    )
+
+
 def _coerce_datetime(value: object) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
@@ -229,8 +316,60 @@ def _read_spinner_value(widget: Spinner, fallback: float, *, cast=float) -> floa
     return cast(widget.value)
 
 
-def _merge_symbol_options(options: list[str], *symbols: str) -> list[str]:
-    merged = {option for option in options if option != INSTRUMENT_PLACEHOLDER}
+def _format_compact_duration(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "n/a"
+    total_seconds = max(0, int(round(float(seconds))))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def normalized_model_config(model_type: str, config: dict[str, object] | None = None) -> dict[str, object]:
+    source = dict(config or {})
+    if model_type == "decision_tree":
+        return {
+            "max_depth": int(source.get("max_depth", 5) or 5),
+            "min_samples_leaf": int(source.get("min_samples_leaf", 6) or 6),
+        }
+    if model_type == "random_forest":
+        max_features = source.get("max_features", "sqrt") or "sqrt"
+        return {
+            "n_estimators": int(source.get("n_estimators", 300) or 300),
+            "max_depth": int(source.get("max_depth", 6) or 6),
+            "min_samples_leaf": int(source.get("min_samples_leaf", 4) or 4),
+            "max_features": str(max_features),
+        }
+    if model_type == "xgboost":
+        return {
+            "n_estimators": int(source.get("n_estimators", 240) or 240),
+            "max_depth": int(source.get("max_depth", 4) or 4),
+            "learning_rate": float(source.get("learning_rate", 0.05) or 0.05),
+            "subsample": float(source.get("subsample", 0.9) or 0.9),
+            "colsample_bytree": float(source.get("colsample_bytree", 0.9) or 0.9),
+            "early_stopping_rounds": int(source.get("early_stopping_rounds", 30) or 30),
+        }
+    raise ValueError(f"Unsupported meta-selector model: {model_type}")
+
+
+@lru_cache(maxsize=1)
+def _meta_selector_runtime():
+    from domain.meta_selector import load_saved_meta_selector_result, run_meta_selector
+
+    return load_saved_meta_selector_result, run_meta_selector
+
+
+@lru_cache(maxsize=1)
+def _has_xgboost_installed() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("xgboost") is not None
+
+
+def _merge_symbol_options(options: Sequence[SymbolSelectOption], *symbols: str) -> list[str]:
+    merged = {_option_value(option) for option in options if _option_value(option) != INSTRUMENT_PLACEHOLDER}
     merged.update(symbol for symbol in symbols if symbol)
     if not merged:
         return [INSTRUMENT_PLACEHOLDER]
@@ -260,6 +399,7 @@ def build_document() -> None:
     optimization_poll_callback: object | None = None
     optimization_cancel_event = Event()
     optimizer_parallel_workers = max(1, int(settings.optimizer_parallel_workers))
+    wfa_history_top_k = None if int(settings.wfa_history_top_k) <= 0 else int(settings.wfa_history_top_k)
     optimization_progress = {"completed": 0, "total": 0, "stage": "Idle"}
     optimization_request_context: dict[str, object] | None = None
     displayed_optimization_signature: dict[str, object] | None = None
@@ -269,12 +409,25 @@ def build_document() -> None:
     suppress_shared_range_change = False
     suppress_portfolio_range_change = False
     suppress_symbol_change_refresh = 0
+    suppress_symbol_filter_sync = 0
+    suppress_scan_selection = False
+    suppress_scanner_selection = False
     scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="johansen-scan")
     scan_future: Future[JohansenUniverseScanResult] | None = None
     scan_poll_callback: object | None = None
+    scan_cancel_event = Event()
     scan_parallel_workers = max(1, int(settings.scan_parallel_workers))
-    scan_progress = {"completed": 0, "total": 0, "stage": "Idle"}
+    scan_progress = {"completed": 0, "total": 0, "stage": "Idle", "workers": scan_parallel_workers, "started_monotonic": None}
     scan_request_context: dict[str, object] | None = None
+    scan_live_state: dict[str, object] = {"version": 0, "applied_version": 0, "result": None}
+    scanner_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="distance-scanner")
+    scanner_future: Future[OptimizerGridScanResult] | None = None
+    scanner_poll_callback: object | None = None
+    scanner_cancel_event = Event()
+    scanner_parallel_workers = 8
+    scanner_progress = {"completed": 0, "total": 0, "stage": "Idle", "workers": scanner_parallel_workers, "started_monotonic": None}
+    scanner_request_context: dict[str, object] | None = None
+    scanner_live_state: dict[str, object] = {"version": 0, "applied_version": 0, "result": None}
     download_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5-download")
     download_future: Future[dict[str, object]] | None = None
     download_poll_callback: object | None = None
@@ -282,18 +435,23 @@ def build_document() -> None:
     wfa_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="distance-wfa")
     wfa_future: Future[dict[str, object]] | None = None
     wfa_poll_callback: object | None = None
-    wfa_progress = {"completed": 0, "total": 0, "stage": "Idle"}
+    wfa_cancel_event = Event()
+    wfa_progress = {"completed": 0, "total": 0, "stage": "Idle", "workers": optimizer_parallel_workers}
     wfa_live_state: dict[str, object] = {"version": 0, "applied_version": 0, "result": None}
     meta_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="meta-selector")
     meta_future: Future[tuple[dict[str, object], PairSelection]] | None = None
     meta_poll_callback: object | None = None
     displayed_meta_signature: dict[str, object] | None = None
+    portfolio_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portfolio-run")
+    portfolio_future: Future[dict[str, object]] | None = None
+    portfolio_poll_callback: object | None = None
     portfolio_run_rows_by_id: dict[str, PortfolioRunRow] = {}
     portfolio_curves_by_id: dict[str, PortfolioCurve] = {}
     portfolio_curve_sources_by_id: dict[str, dict[str, list[object]]] = {}
     portfolio_items_by_id: dict[str, object] = {}
     portfolio_excluded_item_ids: set[str] = set()
     portfolio_preview_item_id: str | None = None
+    ui_bootstrap_complete = False
     current_tester_context: dict[str, object] = {
         "source_kind": "tester_manual",
         "oos_started_at": None,
@@ -563,7 +721,7 @@ def build_document() -> None:
         ],
         sizing_mode="stretch_width",
         height=300,
-        sortable=False,
+        sortable=True,
         reorderable=False,
         index_position=None,
     )
@@ -582,9 +740,9 @@ def build_document() -> None:
         fill_alpha=0.24,
         line_alpha=0.0,
     )
-    equity_plot.line("x", "total", source=state.equity_source, line_width=3, color="#ec4899", legend_label="Total Equity", y_range_name="equity")
-    equity_plot.line("x", "leg1", source=state.equity_source, line_width=1.5, color="#22d3ee", legend_label="Leg 1 Equity", y_range_name="equity")
-    equity_plot.line("x", "leg2", source=state.equity_source, line_width=1.5, color="#16a34a", legend_label="Leg 2 Equity", y_range_name="equity")
+    equity_total_renderer = equity_plot.line("x", "total", source=state.equity_source, line_width=3.5, color="#000000", legend_label="Total Equity", y_range_name="equity")
+    equity_plot.line("x", "leg1", source=state.equity_source, line_width=1.0, color="#22d3ee", legend_label="Leg 1 Equity", y_range_name="equity")
+    equity_plot.line("x", "leg2", source=state.equity_source, line_width=1.0, color="#16a34a", legend_label="Leg 2 Equity", y_range_name="equity")
     equity_plot.add_layout(Span(location=0.0, dimension="width", line_color="#94a3b8", line_alpha=0.35, line_width=1.0))
     optimization_train_box = BoxAnnotation(fill_color="#9ca3af", fill_alpha=0.10, line_alpha=0.0, visible=False)
     optimization_train_start_span = Span(location=0.0, dimension="height", line_color="#6b7280", line_alpha=0.75, line_width=2, line_dash="dashed", visible=False)
@@ -636,9 +794,9 @@ def build_document() -> None:
         text_align="left",
         text_baseline="top",
         background_fill_color="#ffffff",
-        background_fill_alpha=0.08,
+        background_fill_alpha=0.82,
         border_line_color="#94a3b8",
-        border_line_alpha=0.0,
+        border_line_alpha=0.35,
         text_line_height=1.35,
         padding=6,
         visible=False,
@@ -657,14 +815,28 @@ def build_document() -> None:
         const leg2 = source.data.leg2 || [];
         const pad = (value) => String(value).padStart(2, '0');
         const moment = new Date(times[index]);
-        const stamp = `${moment.getFullYear()}-${pad(moment.getMonth() + 1)}-${pad(moment.getDate())} ${pad(moment.getHours())}:${pad(moment.getMinutes())}`;
+        const stamp = `${moment.getUTCFullYear()}-${pad(moment.getUTCMonth() + 1)}-${pad(moment.getUTCDate())} ${pad(moment.getUTCHours())}:${pad(moment.getUTCMinutes())} UTC`;
         const fmt = (value) => Number.isFinite(value) ? value.toFixed(2) : 'na';
-        label.text = `${stamp}
-T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
+        label.text = `${stamp}  T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         label.visible = true;
     """)
     equity_plot.js_on_event(MouseMove, equity_hover_callback)
     equity_plot.js_on_event(MouseLeave, CustomJS(args=dict(label=equity_hover_label), code="label.visible = false;"))
+    equity_plot.add_tools(
+        HoverTool(
+            renderers=[equity_total_renderer],
+            mode="vline",
+            line_policy="nearest",
+            point_policy="snap_to_data",
+            tooltips=[
+                ("Date", "@time{%Y-%m-%d %H:%M UTC}"),
+                ("Total", "@total{0.00}"),
+                ("Leg 1", "@leg1{0.00}"),
+                ("Leg 2", "@leg2{0.00}"),
+            ],
+            formatters={"@time": "datetime"},
+        )
+    )
 
     trades_table = DataTable(
         source=state.trades_source,
@@ -698,6 +870,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             TableColumn(field="omega_ratio", title="Omega", formatter=NumberFormatter(format="0.000"), width=78),
             TableColumn(field="k_ratio", title="K", formatter=NumberFormatter(format="0.000"), width=70),
             TableColumn(field="score_log_trades", title="Score", formatter=NumberFormatter(format="0.000"), width=84),
+            TableColumn(field="cagr", title="CAGR", formatter=NumberFormatter(format="0.0000"), width=82),
+            TableColumn(field="cagr_to_ulcer", title="CAGR/Ulcer", formatter=NumberFormatter(format="0.0000"), width=96),
+            TableColumn(field="r_squared", title="R^2", formatter=NumberFormatter(format="0.0000"), width=74),
+            TableColumn(field="calmar", title="Calmar", formatter=NumberFormatter(format="0.0000"), width=82),
+            TableColumn(field="beauty_score", title="Beauty", formatter=NumberFormatter(format="0.0000"), width=84),
             TableColumn(field="ending_equity", title="Ending", formatter=NumberFormatter(format="0.00"), width=90),
             TableColumn(field="pnl_to_maxdd", title="PnL/DD", formatter=NumberFormatter(format="0.000"), width=82),
             TableColumn(field="ulcer_index", title="Ulcer", formatter=NumberFormatter(format="0.0000"), width=82),
@@ -781,6 +958,39 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     )
     scan_run_button = Button(label="Run Johansen Scan", button_type="primary", width=150)
     scan_status_div = Div(text="<p>Ready to scan the selected universe on its own period.</p>")
+    scanner_universe_select = Select(
+        title="Universe",
+        value=GROUP_OPTIONS[0],
+        options=SCAN_UNIVERSE_OPTIONS,
+        width=150,
+        description="Choose which universe to brute-force with the grid optimizer scanner.",
+    )
+    scanner_cointegration_run_select = Select(
+        title="Pairs From",
+        value=SCANNER_ALL_PAIRS_OPTION,
+        options=[(SCANNER_ALL_PAIRS_OPTION, "All pairs in Scanner universe")],
+        width=420,
+        description="Optional saved cointegration run used to restrict Scanner only to the pairs that passed that run. Labels show scan type, universe and cointegration scan period.",
+    )
+    scanner_grid_trials_input = Spinner(
+        title="Grid Size",
+        low=1,
+        step=10,
+        value=200,
+        width=105,
+        description="Approximate valid grid combinations per pair for the Scanner. Uses the current optimizer bounds, but builds its own auto-grid size target.",
+    )
+    scanner_run_button = Button(label="Run Scanner", button_type="primary", width=150)
+    scanner_eta_button = Button(label="Estimate ETA", button_type="default", width=130)
+    scanner_status_div = Div(
+        text=(
+            "<p>Scanner uses the current optimizer bounds on the full available train history up to the "
+            "<b>Optimization Period</b> end, then keeps the top <b>10</b> profitable rows for each pair, "
+            "ranked by <b>Net</b> first and <b>R^2</b> second. <b>R^2 = 0.9</b> is a soft preference, not a hard cutoff. "
+            "Use <b>Grid Size</b> to control scanner grid density. <b>Pairs From</b> can restrict Scanner to a saved cointegration run. "
+            "<b>Estimate ETA</b> runs one probe pair for a more realistic estimate.</p>"
+        )
+    )
 
     download_scope_select = Select(title="Mode", value=DOWNLOAD_SCOPE_OPTIONS[0], options=DOWNLOAD_SCOPE_OPTIONS, width=110)
     download_group_select = Select(title="Group", value=GROUP_OPTIONS[0], options=GROUP_OPTIONS, width=150)
@@ -814,6 +1024,50 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         ],
         sizing_mode="stretch_width",
         height=260,
+        sortable=True,
+        reorderable=False,
+        index_position=None,
+    )
+    scanner_table_source = ColumnDataSource({})
+
+    def empty_scanner_table_data() -> dict[str, list[object]]:
+        base = optimization_results_to_source(
+            DistanceOptimizationResult(
+                objective_metric="net_profit",
+                evaluated_trials=0,
+                rows=[],
+                best_trial_id=None,
+            )
+        )
+        data: dict[str, list[object]] = {
+            "global_rank": [],
+            "pair_rank": [],
+            "universe_scope": [],
+            "symbol_1": [],
+            "symbol_2": [],
+            "timeframe": [],
+            "initial_capital": [],
+            "leverage": [],
+            "margin_budget_per_leg": [],
+            "slippage_points": [],
+            "fee_mode": [],
+        }
+        data.update({key: [] for key in base.keys()})
+        return data
+
+    scanner_table_source.data = empty_scanner_table_data()
+    scanner_table = DataTable(
+        source=scanner_table_source,
+        columns=[
+            TableColumn(field="global_rank", title="#", formatter=NumberFormatter(format="0"), width=54),
+            TableColumn(field="pair_rank", title="Pair #", formatter=NumberFormatter(format="0"), width=62),
+            TableColumn(field="universe_scope", title="Universe", width=92),
+            TableColumn(field="symbol_1", title="Symbol 1", width=116),
+            TableColumn(field="symbol_2", title="Symbol 2", width=116),
+            *build_optimization_table_columns(show_stop_z=True),
+        ],
+        sizing_mode="stretch_width",
+        height=540,
         sortable=True,
         reorderable=False,
         index_position=None,
@@ -1064,6 +1318,20 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         sizing_mode="stretch_width",
     )
     scan_content = column(scan_controls, scan_export_controls, scan_table, sizing_mode="stretch_width", styles={"gap": "10px"})
+    scanner_controls = column(
+        row(
+            scanner_universe_select,
+            scanner_cointegration_run_select,
+            scanner_grid_trials_input,
+            scanner_eta_button,
+            scanner_run_button,
+            sizing_mode="stretch_width",
+            styles={"gap": "12px", "align-items": "flex-end"},
+        ),
+        scanner_status_div,
+        sizing_mode="stretch_width",
+    )
+    scanner_content = column(scanner_controls, scanner_table, sizing_mode="stretch_width", styles={"gap": "10px"})
     download_controls = column(
         row(
             download_scope_select,
@@ -1100,6 +1368,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "test_net_profit": [],
             "test_ending_equity": [],
             "test_max_drawdown": [],
+            "test_cagr": [],
+            "test_cagr_to_ulcer": [],
+            "test_r_squared": [],
+            "test_calmar": [],
+            "test_beauty_score": [],
             "test_trades": [],
             "test_commission": [],
             "test_total_cost": [],
@@ -1128,6 +1401,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             table["test_net_profit"].append(float(row.get("test_net_profit", 0.0) or 0.0))
             table["test_ending_equity"].append(float(row.get("test_ending_equity", 0.0) or 0.0))
             table["test_max_drawdown"].append(float(row.get("test_max_drawdown", 0.0) or 0.0))
+            table["test_cagr"].append(float(row.get("test_cagr", 0.0) or 0.0))
+            table["test_cagr_to_ulcer"].append(float(row.get("test_cagr_to_ulcer", 0.0) or 0.0))
+            table["test_r_squared"].append(float(row.get("test_r_squared", 0.0) or 0.0))
+            table["test_calmar"].append(float(row.get("test_calmar", 0.0) or 0.0))
+            table["test_beauty_score"].append(float(row.get("test_beauty_score", 0.0) or 0.0))
             table["test_trades"].append(int(row.get("test_trades", 0) or 0))
             table["test_commission"].append(float(row.get("test_commission", 0.0) or 0.0))
             table["test_total_cost"].append(float(row.get("test_total_cost", 0.0) or 0.0))
@@ -1148,6 +1426,13 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     wfa_unit_select = Select(title="Unit", value=WfaWindowUnit.WEEKS.value, options=WFA_UNIT_OPTIONS, width=96)
     wfa_lookback_input = Spinner(title="Lookback", low=1, step=1, value=8, width=92)
     wfa_test_input = Spinner(title="Test", low=1, step=1, value=2, width=92)
+    wfa_workers_input = Spinner(
+        title="Workers",
+        low=1,
+        step=1,
+        value=optimizer_parallel_workers,
+        width=96,
+    )
     wfa_run_button = Button(label="Run WFA", button_type="primary", width=120)
     wfa_status_div = Div(text="<p>Ready to run rolling WFA on the selected tester pair using genetic optimization and the selected objective.</p>")
     wfa_table_source = ColumnDataSource(empty_wfa_table_data())
@@ -1200,6 +1485,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             TableColumn(field="train_score", title="Train Score", formatter=NumberFormatter(format="0.000"), width=90),
             TableColumn(field="test_score", title="Test Score", formatter=NumberFormatter(format="0.000"), width=86),
             TableColumn(field="test_net_profit", title="Test Net", formatter=NumberFormatter(format="0.00"), width=84),
+            TableColumn(field="test_cagr", title="Test CAGR", formatter=NumberFormatter(format="0.0000"), width=88),
+            TableColumn(field="test_cagr_to_ulcer", title="Test C/U", formatter=NumberFormatter(format="0.0000"), width=88),
+            TableColumn(field="test_r_squared", title="Test R^2", formatter=NumberFormatter(format="0.0000"), width=84),
+            TableColumn(field="test_calmar", title="Test Calmar", formatter=NumberFormatter(format="0.0000"), width=92),
+            TableColumn(field="test_beauty_score", title="Test Beauty", formatter=NumberFormatter(format="0.0000"), width=92),
             TableColumn(field="test_max_drawdown", title="Test DD", formatter=NumberFormatter(format="0.00"), width=82),
             TableColumn(field="test_trades", title="Trades", formatter=NumberFormatter(format="0"), width=68),
             TableColumn(field="test_commission", title="Comm", formatter=NumberFormatter(format="0.00"), width=78),
@@ -1219,6 +1509,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             wfa_test_input,
             wfa_period_slider,
             wfa_run_button,
+            wfa_workers_input,
             sizing_mode="stretch_width",
             styles={"gap": "12px", "align-items": "flex-end"},
         ),
@@ -1271,6 +1562,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "test_score": [],
             "test_net_profit": [],
             "test_max_drawdown": [],
+            "test_cagr": [],
+            "test_cagr_to_ulcer": [],
+            "test_r_squared": [],
+            "test_calmar": [],
+            "test_beauty_score": [],
             "test_trades": [],
             "test_commission": [],
             "test_total_cost": [],
@@ -1293,6 +1589,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "actual_test_score_mean": [],
             "actual_test_net_mean": [],
             "actual_test_maxdd_mean": [],
+            "actual_test_cagr_mean": [],
+            "actual_test_cagr_to_ulcer_mean": [],
+            "actual_test_r_squared_mean": [],
+            "actual_test_calmar_mean": [],
+            "actual_test_beauty_mean": [],
             "actual_test_trades_mean": [],
             "train_score_mean": [],
             "train_net_mean": [],
@@ -1326,9 +1627,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
         return data
 
     def default_meta_model() -> str:
-        try:
-            __import__("xgboost")
-        except ModuleNotFoundError:
+        if not _has_xgboost_installed():
             return "decision_tree"
         return "xgboost"
 
@@ -1401,6 +1700,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             TableColumn(field="actual_test_score_mean", title="Test Score", formatter=NumberFormatter(format="0.000"), width=90),
             TableColumn(field="actual_test_net_mean", title="Test Net", formatter=NumberFormatter(format="0.00"), width=88),
             TableColumn(field="actual_test_maxdd_mean", title="Test DD", formatter=NumberFormatter(format="0.00"), width=84),
+            TableColumn(field="actual_test_cagr_mean", title="Test CAGR", formatter=NumberFormatter(format="0.0000"), width=92),
+            TableColumn(field="actual_test_cagr_to_ulcer_mean", title="Test C/U", formatter=NumberFormatter(format="0.0000"), width=90),
+            TableColumn(field="actual_test_r_squared_mean", title="Test R^2", formatter=NumberFormatter(format="0.0000"), width=86),
+            TableColumn(field="actual_test_calmar_mean", title="Test Calmar", formatter=NumberFormatter(format="0.0000"), width=94),
+            TableColumn(field="actual_test_beauty_mean", title="Test Beauty", formatter=NumberFormatter(format="0.0000"), width=94),
             TableColumn(field="actual_test_trades_mean", title="Trades", formatter=NumberFormatter(format="0.0"), width=74),
             TableColumn(field="train_score_mean", title="Train Score", formatter=NumberFormatter(format="0.000"), width=92),
             TableColumn(field="train_net_mean", title="Train Net", formatter=NumberFormatter(format="0.00"), width=88),
@@ -1429,6 +1733,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             TableColumn(field="test_score", title="Score", formatter=NumberFormatter(format="0.000"), width=84),
             TableColumn(field="test_net_profit", title="Net", formatter=NumberFormatter(format="0.00"), width=88),
             TableColumn(field="test_max_drawdown", title="Max DD", formatter=NumberFormatter(format="0.00"), width=88),
+            TableColumn(field="test_cagr", title="CAGR", formatter=NumberFormatter(format="0.0000"), width=86),
+            TableColumn(field="test_cagr_to_ulcer", title="C/U", formatter=NumberFormatter(format="0.0000"), width=84),
+            TableColumn(field="test_r_squared", title="R^2", formatter=NumberFormatter(format="0.0000"), width=80),
+            TableColumn(field="test_calmar", title="Calmar", formatter=NumberFormatter(format="0.0000"), width=88),
+            TableColumn(field="test_beauty_score", title="Beauty", formatter=NumberFormatter(format="0.0000"), width=88),
             TableColumn(field="test_trades", title="Trades", formatter=NumberFormatter(format="0"), width=68),
             TableColumn(field="lookback_bars", title="Lookback", formatter=NumberFormatter(format="0"), width=82),
             TableColumn(field="entry_z", title="Entry", formatter=NumberFormatter(format="0.00"), width=68),
@@ -1545,7 +1854,23 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "ending_equity": [],
             "max_drawdown": [],
             "trades": [],
+            "cagr": [],
+            "cagr_to_ulcer": [],
+            "r_squared": [],
+            "calmar": [],
+            "beauty_score": [],
             "run_status": [],
+        }
+
+    def empty_portfolio_equity_source_data() -> dict[str, list[object]]:
+        return {
+            "time": [],
+            "equity": [],
+            "unrealized_drawdown": [],
+            "unrealized_drawdown_top": [],
+            "capital_load": [],
+            "capital_load_pct": [],
+            "open_positions": [],
         }
 
     def portfolio_items_to_source(
@@ -1577,6 +1902,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             rows["ending_equity"].append(None if run_row is None or run_row.ending_equity is None else float(run_row.ending_equity))
             rows["max_drawdown"].append(None if run_row is None or run_row.max_drawdown is None else float(run_row.max_drawdown))
             rows["trades"].append(None if run_row is None or run_row.trades is None else int(run_row.trades))
+            rows["cagr"].append(None if run_row is None or run_row.cagr is None else float(run_row.cagr))
+            rows["cagr_to_ulcer"].append(None if run_row is None or run_row.cagr_to_ulcer is None else float(run_row.cagr_to_ulcer))
+            rows["r_squared"].append(None if run_row is None or run_row.r_squared is None else float(run_row.r_squared))
+            rows["calmar"].append(None if run_row is None or run_row.calmar is None else float(run_row.calmar))
+            rows["beauty_score"].append(None if run_row is None or run_row.beauty_score is None else float(run_row.beauty_score))
             rows["run_status"].append("" if run_row is None else run_row.status)
         return rows
 
@@ -1620,7 +1950,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
 
     portfolio_table_source = ColumnDataSource(empty_portfolio_table_data())
     portfolio_table_action_source = ColumnDataSource({"item_id": [], "nonce": []})
-    portfolio_equity_source = ColumnDataSource({"time": [], "equity": []})
+    portfolio_equity_source = ColumnDataSource(empty_portfolio_equity_source_data())
     portfolio_weight_source = ColumnDataSource(empty_portfolio_weight_data())
     portfolio_correlation_source = ColumnDataSource(empty_portfolio_correlation_data())
     portfolio_period_slider = DateRangeSlider(
@@ -1642,12 +1972,13 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             "uses inverse return volatility penalized by mean absolute return correlation.</p>"
         )
     )
+    portfolio_metrics_div = Div(text=_format_portfolio_metrics_line(None, label="Portfolio"))
     portfolio_equity_base_title = "Portfolio Equity"
     portfolio_equity_plot = figure(
         title=portfolio_equity_base_title,
         x_axis_type="datetime",
         x_range=Range1d(start=_datetime_to_bokeh_millis(history_start), end=_datetime_to_bokeh_millis(now_utc)),
-        y_range=Range1d(start=0.0, end=1.0),
+        y_range=Range1d(start=-1.0, end=0.0),
         height=390,
         sizing_mode="stretch_width",
         tools="pan,wheel_zoom,box_zoom,reset,save",
@@ -1657,10 +1988,45 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     if portfolio_wheel_zoom is not None:
         portfolio_wheel_zoom.modifiers = {"ctrl": True}
     portfolio_equity_plot.toolbar.autohide = True
-    portfolio_equity_plot.yaxis.axis_label = "Equity"
+    portfolio_equity_plot.yaxis.axis_label = "Unrealized DD"
+    portfolio_equity_plot.extra_y_ranges = {"equity": Range1d(start=0.0, end=1.0)}
+    portfolio_equity_plot.add_layout(LinearAxis(y_range_name="equity", axis_label="Equity"), "right")
     portfolio_oos_cutoff_span = Span(location=0.0, dimension="height", line_color="#dc2626", line_alpha=0.60, line_width=2, line_dash="dashed", visible=False)
     portfolio_equity_plot.add_layout(portfolio_oos_cutoff_span)
-    portfolio_equity_plot.line("time", "equity", source=portfolio_equity_source, line_width=2.5, color="#0f172a")
+    portfolio_equity_plot.varea(
+        x="time",
+        y1="unrealized_drawdown_top",
+        y2="unrealized_drawdown",
+        source=portfolio_equity_source,
+        fill_color="#f97316",
+        fill_alpha=0.20,
+    )
+    portfolio_equity_renderer = portfolio_equity_plot.line(
+        "time",
+        "equity",
+        source=portfolio_equity_source,
+        line_width=2.6,
+        color="#0f172a",
+        y_range_name="equity",
+    )
+    portfolio_equity_plot.add_layout(Span(location=0.0, dimension="width", line_color="#94a3b8", line_alpha=0.35, line_width=1.0))
+    portfolio_equity_plot.add_tools(
+        HoverTool(
+            renderers=[portfolio_equity_renderer],
+            mode="vline",
+            line_policy="nearest",
+            point_policy="snap_to_data",
+            tooltips=[
+                ("Date", "@time{%Y-%m-%d %H:%M UTC}"),
+                ("Equity", "@equity{0.00}"),
+                ("Unreal DD", "@unrealized_drawdown{0.00}"),
+                ("Cap Load", "@capital_load{0.00}"),
+                ("Load %", "@capital_load_pct{0.00}%"),
+                ("Open Pairs", "@open_positions{0}"),
+            ],
+            formatters={"@time": "datetime"},
+        )
+    )
     portfolio_table = DataTable(
         source=portfolio_table_source,
         columns=[
@@ -1681,6 +2047,11 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
             TableColumn(field="ending_equity", title="Ending", formatter=NumberFormatter(format="0.00"), width=88),
             TableColumn(field="max_drawdown", title="Max DD", formatter=NumberFormatter(format="0.00"), width=88),
             TableColumn(field="trades", title="Trades", formatter=NumberFormatter(format="0"), width=68),
+            TableColumn(field="cagr", title="CAGR", formatter=NumberFormatter(format="0.0000"), width=84),
+            TableColumn(field="cagr_to_ulcer", title="C/U", formatter=NumberFormatter(format="0.0000"), width=84),
+            TableColumn(field="r_squared", title="R^2", formatter=NumberFormatter(format="0.0000"), width=78),
+            TableColumn(field="calmar", title="Calmar", formatter=NumberFormatter(format="0.0000"), width=86),
+            TableColumn(field="beauty_score", title="Beauty", formatter=NumberFormatter(format="0.0000"), width=86),
             TableColumn(field="run_status", title="Run", width=92),
         ],
         sizing_mode="stretch_width",
@@ -1736,6 +2107,7 @@ T ${fmt(total[index])}  L1 ${fmt(leg1[index])}  L2 ${fmt(leg2[index])}`;
     )
     portfolio_content = column(
         portfolio_controls,
+        portfolio_metrics_div,
         portfolio_equity_plot,
         portfolio_table,
         Div(text="<b>Portfolio Allocation Analysis</b>"),
@@ -1858,6 +2230,7 @@ if (!attach()) {
     wfa_block, wfa_body, wfa_toggle = _build_section("WFA", wfa_content)
     meta_block, meta_body, meta_toggle = _build_section("Meta Selector", meta_content)
     scan_block, scan_body, scan_toggle = _build_section("Cointegration Results", scan_content)
+    scanner_block, scanner_body, scanner_toggle = _build_section("Scanner", scanner_content)
     download_block, download_body, download_toggle = _build_section("Downloader", download_content)
 
     plots = [price_1, price_2, spread_plot, zscore_plot, equity_plot]
@@ -1895,6 +2268,7 @@ if (!attach()) {
         ("wfa", wfa_body, wfa_toggle),
         ("meta", meta_body, meta_toggle),
         ("cointegration", scan_body, scan_toggle),
+        ("scanner", scanner_body, scanner_toggle),
         ("downloader", download_body, download_toggle),
     ]
 
@@ -1952,6 +2326,7 @@ if (!attach()) {
         BrowserStateBinding("wfa_unit", wfa_unit_select, kind="select"),
         BrowserStateBinding("wfa_lookback", wfa_lookback_input),
         BrowserStateBinding("wfa_test", wfa_test_input),
+        BrowserStateBinding("wfa_workers", wfa_workers_input),
         BrowserStateBinding("meta_model", meta_model_select, kind="select"),
         BrowserStateBinding("meta_objective", meta_objective_select, kind="select"),
         BrowserStateBinding("meta_oos_start", meta_oos_start_picker),
@@ -1974,6 +2349,9 @@ if (!attach()) {
         BrowserStateBinding("scan_det_order", scan_det_order_input),
         BrowserStateBinding("scan_k_ar_diff", scan_k_ar_diff_input),
         BrowserStateBinding("scan_period", scan_period_slider, kind="range"),
+        BrowserStateBinding("scanner_universe", scanner_universe_select, kind="select"),
+        BrowserStateBinding("scanner_cointegration_run", scanner_cointegration_run_select, kind="select", restore_on_options_change=True),
+        BrowserStateBinding("scanner_grid_trials", scanner_grid_trials_input),
         BrowserStateBinding("download_scope", download_scope_select, kind="select"),
         BrowserStateBinding("download_group", download_group_select, kind="select"),
         BrowserStateBinding("download_symbol", download_symbol_select, kind="select", restore_on_options_change=True),
@@ -1994,6 +2372,7 @@ if (!attach()) {
         BrowserStateBinding("show_wfa", wfa_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_meta", meta_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_cointegration", scan_body, property_name="visible", kind="visible"),
+        BrowserStateBinding("show_scanner", scanner_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_downloader", download_body, property_name="visible", kind="visible"),
         BrowserStateBinding("show_service_logs", service_log_body, property_name="visible", kind="visible"),
     ]
@@ -2026,9 +2405,14 @@ if (!attach()) {
     def sync_service_log_toggle() -> None:
         service_log_toggle.button_type = "primary" if service_log_body.visible else "default"
 
+    def sync_section_toggle_states() -> None:
+        sync_toggle_button_types([(body, toggle) for _key, _plot, _source, _columns, body, toggle in plot_bindings])
+        sync_toggle_button_types([(body, toggle) for _key, body, toggle in block_bindings])
+        sync_service_log_toggle()
+
     def set_section_visibility(key: str, body, toggle: Button, visible: bool) -> None:
         body.visible = visible
-        toggle.button_type = "primary" if visible else "default"
+        sync_section_toggle_states()
         rebalance_layout()
         refresh_plot_ranges()
         try:
@@ -2060,22 +2444,52 @@ if (!attach()) {
         for label, column_text in zip(equity_summary_labels, columns):
             label.text = column_text
             label.visible = True
+        sync_equity_summary_overlay_position()
+
+        queue_sync_equity_summary_overlay_position()
+
+    def queue_sync_equity_summary_overlay_position() -> None:
+        try:
+            doc.add_next_tick_callback(sync_equity_summary_overlay_position)
+        except Exception:
+            pass
+
+    def _safe_plot_dimension(plot, inner_name: str, outer_name: str, fallback: int) -> int:
+        try:
+            inner_value = getattr(plot, inner_name)
+        except UnsetValueError:
+            inner_value = None
+        except Exception:
+            inner_value = None
+        if inner_value not in (None, 0):
+            return int(inner_value)
+        try:
+            outer_value = getattr(plot, outer_name)
+        except UnsetValueError:
+            outer_value = None
+        except Exception:
+            outer_value = None
+        if outer_value not in (None, 0):
+            return int(outer_value)
+        return int(fallback)
 
     def sync_equity_summary_overlay_position() -> None:
-        plot_width = int(equity_plot.width or 1100)
-        plot_height = int(equity_plot.height or 440)
-        equity_hover_label.x = max(16, plot_width - 270)
-        equity_hover_label.y = max(72, plot_height - 56)
+        plot_width = _safe_plot_dimension(equity_plot, "inner_width", "width", 1100)
+        plot_height = _safe_plot_dimension(equity_plot, "inner_height", "height", 440)
+        equity_hover_label.x = 18
+        equity_hover_label.y = max(88, plot_height - 18)
 
         visible_labels = [label for label in equity_summary_labels if label.visible and label.text]
         if not visible_labels:
             return
 
         left_margin = 16
-        baseline_y = 20
+        baseline_y = 8
         gap = 18
         padding_px = 18
-        overlay_anchor = "top" if plot_height <= 340 else "bottom"
+        overlay_anchor = "bottom"
+        top_margin = 72
+        right_margin = 6
 
         base_font_px = max(8, int(_read_spinner_value(plot_font_size_input, 11, cast=int)))
         chosen_font_px, positions = compute_overlay_label_layout(
@@ -2084,17 +2498,25 @@ if (!attach()) {
             base_font_px=base_font_px,
             plot_height=plot_height,
             left_margin=left_margin,
-            right_margin=16,
+            right_margin=right_margin,
             gap=gap,
             padding_px=padding_px,
             baseline_y=baseline_y,
-            top_margin=72,
+            top_margin=top_margin,
+            max_rows=2,
             vertical_anchor=overlay_anchor,
+            horizontal_anchor="right",
         )
         for label, (x_pos, y_pos) in zip(visible_labels, positions):
             label.text_font_size = f"{chosen_font_px}px"
             label.x = x_pos
             label.y = y_pos
+
+    def on_equity_plot_geometry_change(_attr: str, _old: object, _new: object) -> None:
+        sync_equity_summary_overlay_position()
+
+    def on_document_ready(_event: DocumentReady) -> None:
+        queue_sync_equity_summary_overlay_position()
 
     def sync_equity_legend(symbol_1: str | None, symbol_2: str | None) -> None:
         if not equity_plot.legend:
@@ -2404,11 +2826,12 @@ if (!attach()) {
     def current_backtest_request(
         *,
         period_override: tuple[datetime, datetime] | None = None,
+        pair_override: PairSelection | None = None,
     ) -> tuple[dict[str, object] | None, str | None]:
         if algorithm_select.value != "distance":
             return None, "<p>Only the first Distance tester slice is wired right now.</p>"
 
-        pair = current_pair()
+        pair = pair_override if isinstance(pair_override, PairSelection) else current_pair()
         if pair is None:
             return None, "<p>Refresh instruments and choose two different valid instruments first.</p>"
 
@@ -2662,18 +3085,16 @@ if (!attach()) {
             plot.y_range.end = upper
 
     def rebalance_layout() -> None:
+        sync_section_toggle_states()
         visible_plots = [plot for _key, plot, _source, _columns, body, _toggle in plot_bindings if body.visible]
         visible_blocks = [body for _key, body, _toggle in block_bindings if body.visible]
         plot_height = configured_plot_height(len(visible_plots), len(visible_blocks))
         equity_visible = equity_body.visible
-        for _key, plot, _source, _columns, body, toggle in plot_bindings:
+        for _key, plot, _source, _columns, body, _toggle in plot_bindings:
             plot.visible = body.visible
-            toggle.button_type = "primary" if body.visible else "default"
             if body.visible:
                 plot.height = compute_relative_plot_height(_key, plot_height, equity_visible=equity_visible)
         sync_equity_summary_overlay_position()
-        for _key, body, toggle in block_bindings:
-            toggle.button_type = "primary" if body.visible else "default"
 
         last_visible_plot = visible_plots[-1] if visible_plots else None
         for plot in plots:
@@ -2752,6 +3173,34 @@ if (!attach()) {
                 data[column] = frame.get_column(column).to_list()
         return data
 
+    def _instrument_option_label(symbol: str, description: object | None) -> str:
+        normalized_symbol = str(symbol or "").strip()
+        normalized_description = str(description or "").strip()
+        if not normalized_symbol:
+            return INSTRUMENT_PLACEHOLDER
+        if not normalized_description:
+            return normalized_symbol
+        return f"{normalized_symbol}, {normalized_description}"
+
+    def _symbol_label_map() -> dict[str, str]:
+        try:
+            catalog = load_instrument_catalog_frame(broker)
+        except Exception:
+            return {}
+        if catalog.is_empty():
+            return {}
+        return {
+            str(row["symbol"]): _instrument_option_label(str(row["symbol"]), row.get("description"))
+            for row in catalog.select(["symbol", "description"]).iter_rows(named=True)
+        }
+
+    def _symbol_select_options(symbols: Sequence[str]) -> list[SymbolSelectOption]:
+        normalized_symbols = sorted({str(symbol or "").strip() for symbol in symbols if str(symbol or "").strip()})
+        if not normalized_symbols:
+            return [INSTRUMENT_PLACEHOLDER]
+        labels = _symbol_label_map()
+        return [(symbol, labels.get(symbol, symbol)) for symbol in normalized_symbols]
+
     def _preferred_symbol_1(options: list[str], current: str | None) -> str:
         candidates = [option for option in options if option != INSTRUMENT_PLACEHOLDER]
         if not candidates:
@@ -2778,7 +3227,7 @@ if (!attach()) {
         except Exception as exc:  # pragma: no cover - runtime UI path
             summary_div.text = f"<p>Instrument catalog unavailable: {exc}</p>"
             return [INSTRUMENT_PLACEHOLDER]
-        catalog = filter_catalog_by_group(catalog, selected_group)
+        catalog = filter_catalog_by_group(catalog, selected_group, broker=broker)
         options = catalog.get_column('symbol').sort().to_list() if not catalog.is_empty() else []
         return options or [INSTRUMENT_PLACEHOLDER]
 
@@ -2787,11 +3236,11 @@ if (!attach()) {
             catalog = load_instrument_catalog_frame(broker)
         except Exception:
             return list(GROUP_OPTIONS)
-        return list_mt5_group_options(catalog)
+        return list_mt5_group_options(catalog, broker=broker)
 
     def sync_catalog_group_select_options() -> None:
         options = available_catalog_group_options()
-        for selector in (group_select, scan_universe_select, download_group_select):
+        for selector in (group_select, scan_universe_select, scanner_universe_select, download_group_select):
             current_value = selector.value if selector.value in options else options[0]
             selector.options = options
             if selector.value != current_value:
@@ -2799,13 +3248,19 @@ if (!attach()) {
 
     def current_download_terminal_path() -> Path:
         configured = settings.mt5_terminal_path or DEFAULT_MT5_TERMINAL_PATH
-        return Path(configured)
+        return coerce_platform_path(configured)
+
+    def current_download_common_root() -> Path:
+        configured = settings.mt5_common_root
+        if configured:
+            return coerce_platform_path(configured)
+        return default_common_root()
 
     def sync_downloader_symbol_options(*, show_message: bool = False) -> None:
         options = instrument_options_for_group(download_group_select.value)
         if not options:
             options = [INSTRUMENT_PLACEHOLDER]
-        download_symbol_select.options = options
+        download_symbol_select.options = _clone_select_options(_symbol_select_options(options))
         download_symbol_select.value = _preferred_symbol_1(options, download_symbol_select.value)
         if show_message and download_scope_select.value == "symbol":
             visible_count = len([option for option in options if option != INSTRUMENT_PLACEHOLDER])
@@ -2845,8 +3300,309 @@ if (!attach()) {
             return ScanUniverseMode.GROUP, scan_universe_select.value
         return ScanUniverseMode.ALL, None
 
+    def current_scan_period() -> tuple[datetime, datetime]:
+        return (
+            _coerce_datetime(scan_period_slider.value[0]),
+            _coerce_datetime(scan_period_slider.value[1]),
+        )
+
+    def current_johansen_scan_config() -> dict[str, object]:
+        return {
+            "unit_root_test_value": str(scan_unit_root_select.value or ""),
+            "det_order": int(_read_spinner_value(scan_det_order_input, 0, cast=int)),
+            "k_ar_diff": int(_read_spinner_value(scan_k_ar_diff_input, 1, cast=int)),
+            "significance_level": float(scan_significance_select.value),
+        }
+
+    def scanner_cointegration_run_options() -> list[tuple[str, str]]:
+        options: list[tuple[str, str]] = [(SCANNER_ALL_PAIRS_OPTION, "All pairs in Scanner universe")]
+        for run in list_saved_scan_runs(
+            broker=broker,
+            timeframe=Timeframe(timeframe_select.value),
+        ):
+            options.append((run.value, run.label))
+        return options
+
+    def sync_scanner_cointegration_run_options() -> None:
+        options = scanner_cointegration_run_options()
+        scanner_cointegration_run_select.options = options
+        valid_values = {str(value) for value, _label in options}
+        if str(scanner_cointegration_run_select.value or "") not in valid_values:
+            scanner_cointegration_run_select.value = SCANNER_ALL_PAIRS_OPTION
+
+    def current_scanner_cointegration_snapshot() -> SavedScanSnapshot | None:
+        selected_value = str(scanner_cointegration_run_select.value or "")
+        if not selected_value or selected_value == SCANNER_ALL_PAIRS_OPTION:
+            return None
+        snapshot = load_saved_scan_result_by_summary_path(summary_path=selected_value)
+        if snapshot is None:
+            return None
+        if snapshot.timeframe.value != Timeframe(timeframe_select.value).value:
+            return None
+        return snapshot
+
+    def current_scanner_pair_source_label() -> str:
+        snapshot = current_scanner_cointegration_snapshot()
+        if snapshot is None:
+            return "all pairs in scanner universe"
+        saved_label = snapshot.created_at.strftime('%Y-%m-%d %H:%M UTC') if isinstance(snapshot.created_at, datetime) else 'unknown save'
+        period_started = str(snapshot.summary.get('started_at') or '').replace('T', ' ').replace('+00:00', ' UTC')
+        period_ended = str(snapshot.summary.get('ended_at') or '').replace('T', ' ').replace('+00:00', ' UTC')
+        period_label = f"{period_started} .. {period_ended}" if period_started and period_ended else "unknown period"
+        return f"{snapshot.scan_kind} | {snapshot.scope} | {period_label} | saved {saved_label}"
+
+    def scanner_allowed_pair_keys_for_scope(
+        snapshot: SavedScanSnapshot | None,
+        universe_symbols: Sequence[str],
+    ) -> list[str] | None:
+        if snapshot is None or snapshot.passed_pairs.is_empty():
+            return None
+        allowed_symbols = set(str(symbol) for symbol in universe_symbols)
+        allowed_pair_keys: list[str] = []
+        for symbol_1, symbol_2 in snapshot.passed_pairs.select("symbol_1", "symbol_2").iter_rows():
+            left = str(symbol_1)
+            right = str(symbol_2)
+            if left not in allowed_symbols or right not in allowed_symbols:
+                continue
+            normalized_left, normalized_right = sorted((left, right))
+            allowed_pair_keys.append(f"{normalized_left}::{normalized_right}")
+        return sorted(dict.fromkeys(allowed_pair_keys))
+
+    def exact_group_allowed_pair_keys(
+        normalized_group: str | None,
+        universe_symbols: Sequence[str],
+    ) -> list[str] | None:
+        if not is_cointegration_candidates_group(normalized_group):
+            return None
+        allowed_symbols = {str(symbol) for symbol in universe_symbols}
+        return list(cointegration_candidate_pair_keys(broker, allowed_symbols=allowed_symbols))
+
+    def merge_allowed_pair_key_filters(*filters: list[str] | None) -> list[str] | None:
+        active_filters = [set(str(item) for item in current if str(item)) for current in filters if current is not None]
+        if not active_filters:
+            return None
+        merged = set(active_filters[0])
+        for current in active_filters[1:]:
+            merged &= current
+        return sorted(merged)
+
+    def scan_snapshot_pair_keys(snapshot: SavedScanSnapshot) -> set[str]:
+        frame = snapshot.all_pairs if not snapshot.all_pairs.is_empty() else snapshot.passed_pairs
+        if frame.is_empty():
+            return set()
+        keys: set[str] = set()
+        for left, right in frame.select("symbol_1", "symbol_2").iter_rows():
+            normalized_left, normalized_right = sorted((str(left), str(right)))
+            keys.add(f"{normalized_left}::{normalized_right}")
+        return keys
+
+    def scan_snapshot_matches_exact_group_pairs(
+        snapshot: SavedScanSnapshot | None,
+        normalized_group: str | None,
+    ) -> bool:
+        if snapshot is None or not is_cointegration_candidates_group(normalized_group):
+            return True
+        allowed_pair_keys = set(cointegration_candidate_pair_keys(broker))
+        snapshot_pair_keys = scan_snapshot_pair_keys(snapshot)
+        return snapshot_pair_keys.issubset(allowed_pair_keys)
+
+    def current_scanner_selection_scope() -> tuple[ScanUniverseMode, str | None]:
+        if scanner_universe_select.value != 'all':
+            return ScanUniverseMode.GROUP, scanner_universe_select.value
+        return ScanUniverseMode.ALL, None
+
+    def current_scanner_view_scope_label() -> str | None:
+        if scanner_universe_select.value == 'all':
+            return None
+        return str(scanner_universe_select.value or "")
+
+    def available_scanner_scope_labels() -> list[str]:
+        labels: list[str] = []
+        for option in available_catalog_group_options():
+            label = str(option or "").strip()
+            if not label or label == ScanUniverseMode.ALL.value or label in labels:
+                continue
+            labels.append(label)
+        return labels
+
+    def selected_scanner_scope_labels() -> list[str]:
+        view_scope = current_scanner_view_scope_label()
+        if view_scope is not None:
+            return [view_scope]
+        return available_scanner_scope_labels()
+
+    def scanner_target_grid_trials() -> int:
+        return max(1, int(_read_spinner_value(scanner_grid_trials_input, 200, cast=int)))
+
+    def current_optimizer_oos_started_at() -> datetime:
+        return _coerce_datetime(optimization_period_slider.value[1])
+
+    def current_scanner_train_period() -> tuple[datetime, datetime] | None:
+        timeframe = Timeframe(timeframe_select.value)
+        train_started_at = history_start
+        oos_started_at = current_optimizer_oos_started_at()
+        train_ended_at = oos_started_at - timedelta(minutes=BAR_MINUTES[timeframe])
+        if train_ended_at <= train_started_at:
+            return None
+        return train_started_at, train_ended_at
+
+    def active_scanner_train_period() -> tuple[datetime, datetime] | None:
+        if scanner_request_context is not None:
+            train_started_at = scanner_request_context.get("train_started_at")
+            train_ended_at = scanner_request_context.get("train_ended_at")
+            if isinstance(train_started_at, datetime) and isinstance(train_ended_at, datetime):
+                return train_started_at, train_ended_at
+        return current_scanner_train_period()
+
+    def active_scanner_oos_started_at() -> datetime:
+        if scanner_request_context is not None:
+            oos_started_at = scanner_request_context.get("oos_started_at")
+            if isinstance(oos_started_at, datetime):
+                return oos_started_at
+        return current_optimizer_oos_started_at()
+
+    def scanner_search_space() -> dict[str, Any]:
+        return _auto_optimization_search_space(target_trials=scanner_target_grid_trials())
+
+    def build_selected_scanner_scope_jobs(
+        *,
+        search_signature: str,
+    ) -> list[dict[str, object]]:
+        scope_jobs: list[dict[str, object]] = []
+        pair_filter_snapshot = current_scanner_cointegration_snapshot()
+        selected_view_scope = current_scanner_view_scope_label()
+        if selected_view_scope is None:
+            available_groups = available_scanner_scope_labels()
+            if not available_groups:
+                available_groups = [None]
+        else:
+            available_groups = [selected_view_scope]
+
+        for normalized_group in available_groups:
+            universe_mode = ScanUniverseMode.ALL if normalized_group is None else ScanUniverseMode.GROUP
+            universe_symbols = resolve_scan_symbols(
+                broker=broker,
+                universe_mode=universe_mode,
+                normalized_group=normalized_group,
+            )
+            allowed_pair_keys = merge_allowed_pair_key_filters(
+                exact_group_allowed_pair_keys(normalized_group, universe_symbols),
+                scanner_allowed_pair_keys_for_scope(pair_filter_snapshot, universe_symbols),
+            )
+            pair_count = len(allowed_pair_keys) if allowed_pair_keys is not None else scanner_pair_count(len(universe_symbols))
+            scope_label = scanner_scope_label(universe_mode, normalized_group)
+            cached_snapshot = load_optimizer_scanner_snapshot(
+                broker=broker,
+                search_signature=search_signature,
+                scope=scope_label,
+            )
+            cached_pairs = 0
+            cached_result: OptimizerGridScanResult | None = None
+            resume_result: OptimizerGridScanResult | None = None
+            if cached_snapshot is not None:
+                cached_result = cached_snapshot.result
+                cached_pairs = int(cached_snapshot.result.summary.total_pairs_evaluated or 0)
+                if 0 < cached_pairs < pair_count:
+                    resume_result = cached_snapshot.result
+            scope_jobs.append(
+                {
+                    "universe_mode": universe_mode,
+                    "normalized_group": normalized_group,
+                    "scope_label": scope_label,
+                    "symbols": list(universe_symbols),
+                    "symbol_count": len(universe_symbols),
+                    "pair_count": pair_count,
+                    "allowed_pair_keys": list(allowed_pair_keys or []),
+                    "cached_pairs": cached_pairs,
+                    "cached_result": cached_result,
+                    "resume_result": resume_result,
+                    "processed_pair_keys": {
+                        str(item)
+                        for item in ((resume_result.processed_pair_keys if resume_result is not None else []) or [])
+                        if str(item)
+                    },
+                }
+            )
+        return scope_jobs
+
+    def current_scanner_request_signature(
+        *,
+        train_period: tuple[datetime, datetime] | None = None,
+        oos_started_at: datetime | None = None,
+        search_space: dict[str, object] | None = None,
+    ) -> str | None:
+        effective_train_period = train_period or current_scanner_train_period()
+        if effective_train_period is None:
+            return None
+        effective_oos_started_at = oos_started_at or current_optimizer_oos_started_at()
+        pair_filter_snapshot = current_scanner_cointegration_snapshot()
+        pair_filter_signature = ""
+        if pair_filter_snapshot is not None:
+            pair_filter_signature = str(pair_filter_snapshot.summary_path)
+        exact_pairs_signature = cointegration_candidate_signature(broker)
+        if exact_pairs_signature:
+            pair_filter_signature = (
+                f"{pair_filter_signature}|{exact_pairs_signature}"
+                if pair_filter_signature
+                else exact_pairs_signature
+            )
+        return build_optimizer_scanner_request_signature(
+            timeframe=Timeframe(timeframe_select.value),
+            train_started_at=effective_train_period[0],
+            train_ended_at=effective_train_period[1],
+            oos_started_at=effective_oos_started_at,
+            defaults=build_defaults(),
+            search_space=search_space or scanner_search_space(),
+            fee_mode=str(bybit_fee_mode_select.value or ""),
+            min_r_squared=0.9,
+            top_n_per_pair=10,
+            pair_filter_signature=pair_filter_signature,
+        )
+
+    def copy_pair_to_selectors(symbol_1: str, symbol_2: str) -> None:
+        nonlocal suppress_symbol_filter_sync
+        options = _merge_symbol_options(list(symbol_1_select.options), symbol_1, symbol_2)
+        begin_symbol_change_refresh_suppression()
+        suppress_symbol_filter_sync += 1
+        try:
+            symbol_1_select.options = _clone_select_options(_symbol_select_options(options))
+            symbol_2_select.options = _clone_select_options(_symbol_select_options(options))
+            symbol_1_select.value = symbol_1
+            symbol_2_select.value = symbol_2
+        finally:
+            suppress_symbol_filter_sync = max(0, suppress_symbol_filter_sync - 1)
+            end_symbol_change_refresh_suppression()
+
+    def scanner_is_running() -> bool:
+        return scanner_future is not None and not scanner_future.done()
+
+    def scanner_busy_message(action_label: str) -> str:
+        if scanner_cancel_event.is_set():
+            return f"<p>Scanner stop already requested. Wait for it to finish before {action_label}.</p>"
+        return f"<p>Scanner is still running. Stop it or wait for completion before {action_label}.</p>"
+
+    def running_heavy_job_label(*, exclude: str | None = None) -> str | None:
+        checks = (
+            ("tester", tester_future, "Distance test"),
+            ("optimization", optimization_future, "Optimization"),
+            ("cointegration", scan_future, "Johansen scan"),
+            ("scanner", scanner_future, "Scanner"),
+            ("portfolio", portfolio_future, "Portfolio"),
+            ("downloader", download_future, "Downloader"),
+            ("wfa", wfa_future, "WFA"),
+            ("meta", meta_future, "Meta Selector"),
+        )
+        for key, future, label in checks:
+            if exclude == key:
+                continue
+            if future is not None and not future.done():
+                return label
+        return None
+
     def load_tester_cointegration_snapshot() -> object | None:
         universe_mode, normalized_group = current_tester_cointegration_scope()
+        started_at, ended_at = current_scan_period()
+        johansen_config = current_johansen_scan_config()
         return load_latest_saved_scan_result(
             broker=broker,
             scan_kind=leg_2_cointegration_kind_select.value,
@@ -2854,10 +3610,18 @@ if (!attach()) {
             universe_mode=universe_mode,
             normalized_group=normalized_group,
             allow_all_fallback=True,
+            started_at=started_at,
+            ended_at=ended_at,
+            unit_root_test_value=johansen_config["unit_root_test_value"] if leg_2_cointegration_kind_select.value == "johansen" else None,
+            det_order=johansen_config["det_order"] if leg_2_cointegration_kind_select.value == "johansen" else None,
+            k_ar_diff=johansen_config["k_ar_diff"] if leg_2_cointegration_kind_select.value == "johansen" else None,
+            significance_level=johansen_config["significance_level"] if leg_2_cointegration_kind_select.value == "johansen" else None,
         )
 
     def restore_saved_scan_table(*, show_message: bool) -> object | None:
         universe_mode, normalized_group = current_scan_selection_scope()
+        started_at, ended_at = current_scan_period()
+        johansen_config = current_johansen_scan_config()
         snapshot = load_latest_saved_scan_result(
             broker=broker,
             scan_kind=scan_kind_select.value,
@@ -2865,6 +3629,12 @@ if (!attach()) {
             universe_mode=universe_mode,
             normalized_group=normalized_group,
             allow_all_fallback=False,
+            started_at=started_at,
+            ended_at=ended_at,
+            unit_root_test_value=johansen_config["unit_root_test_value"] if scan_kind_select.value == "johansen" else None,
+            det_order=johansen_config["det_order"] if scan_kind_select.value == "johansen" else None,
+            k_ar_diff=johansen_config["k_ar_diff"] if scan_kind_select.value == "johansen" else None,
+            significance_level=johansen_config["significance_level"] if scan_kind_select.value == "johansen" else None,
         )
         if snapshot is None:
             state.scan_source.data = _empty_scan_source_data()
@@ -2873,7 +3643,17 @@ if (!attach()) {
                 scope_label = normalized_group or 'all'
                 scan_status_div.text = (
                     f"<p>No saved <b>{scan_kind_select.value}</b> cointegration table found for "
-                    f"<b>{timeframe_select.value}</b> / <b>{scope_label}</b>.</p>"
+                    f"<b>{timeframe_select.value}</b> / <b>{scope_label}</b> on "
+                    f"<b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+                )
+            return None
+        if not scan_snapshot_matches_exact_group_pairs(snapshot, normalized_group):
+            state.scan_source.data = _empty_scan_source_data()
+            state.scan_source.selected.indices = []
+            if show_message:
+                scan_status_div.text = (
+                    f"<p>Saved <b>{scan_kind_select.value}</b> table for <b>{normalized_group or 'all'}</b> was ignored because "
+                    f"it does not match the current exact pair list from <b>{COINTEGRATION_CANDIDATES_GROUP}</b>.</p>"
                 )
             return None
 
@@ -2884,11 +3664,62 @@ if (!attach()) {
             created_label = snapshot.created_at.astimezone(UTC).strftime('%Y-%m-%d %H:%M UTC') if snapshot.created_at else 'unknown time'
             started_label = str(snapshot.summary.get('started_at', ''))
             ended_label = str(snapshot.summary.get('ended_at', ''))
+            completeness_label = "complete" if snapshot.complete else "partial"
             scan_status_div.text = (
                 f"<p>Loaded saved <b>{snapshot.scan_kind}</b> table for <b>{snapshot.timeframe.value}</b> / <b>{snapshot.scope}</b>. "
                 f"Passed: {int(scan_summary.get('threshold_passed_pairs', snapshot.passed_pairs.height) or 0)}, "
                 f"Pairs: {int(scan_summary.get('total_pairs_evaluated', snapshot.all_pairs.height) or 0)}, "
-                f"saved at <b>{created_label}</b>. Period: <b>{started_label}</b> .. <b>{ended_label}</b>.</p>"
+                f"saved at <b>{created_label}</b> (<b>{completeness_label}</b>). Period: <b>{started_label}</b> .. <b>{ended_label}</b>.</p>"
+            )
+        return snapshot
+
+    def restore_saved_scanner_table(*, show_message: bool) -> object | None:
+        if scanner_is_running():
+            return None
+        train_period = current_scanner_train_period()
+        if train_period is None:
+            scanner_table_source.data = empty_scanner_table_data()
+            scanner_table_source.selected.indices = []
+            if show_message:
+                scanner_status_div.text = (
+                    "<p>Scanner train history is empty. Move the <b>Optimization Period</b> end later so OOS starts after at least one bar of train data.</p>"
+                )
+            return None
+        search_signature = current_scanner_request_signature(train_period=train_period)
+        if not search_signature:
+            scanner_table_source.data = empty_scanner_table_data()
+            scanner_table_source.selected.indices = []
+            return None
+        view_scope = current_scanner_view_scope_label()
+        snapshot = load_optimizer_scanner_snapshot(
+            broker=broker,
+            search_signature=search_signature,
+            scope=view_scope,
+        )
+        pair_source_label = current_scanner_pair_source_label()
+        if snapshot is None:
+            scanner_table_source.data = empty_scanner_table_data()
+            scanner_table_source.selected.indices = []
+            if show_message:
+                scope_label = view_scope or "all cached universes"
+                scanner_status_div.text = (
+                    f"<p>No saved Scanner table found for <b>{scope_label}</b> with pair source <b>{pair_source_label}</b> "
+                    f"on the current timeframe/train window and optimizer settings.</p>"
+                )
+            return None
+        apply_scanner_snapshot(snapshot.result, final=True)
+        if show_message:
+            summary = snapshot.result.summary
+            scope_label = view_scope or "all cached universes"
+            saved_label = snapshot.saved_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC") if snapshot.saved_at else "unknown time"
+            oos_started_at = current_optimizer_oos_started_at()
+            scanner_status_div.text = (
+                f"<p>Loaded saved Scanner table for <b>{scope_label}</b>. Pairs processed: <b>{summary.total_pairs_evaluated}</b>"
+                f" / <b>{summary.total_pair_candidates}</b>, rows kept: <b>{summary.total_rows}</b>, "
+                f"trials: <b>{summary.total_trials_evaluated}</b>, saved at <b>{saved_label}</b>. "
+                f"Pair source: <b>{pair_source_label}</b>. "
+                f"Train: <b>{train_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{train_period[1]:%Y-%m-%d %H:%M} UTC</b>. "
+                f"OOS starts at <b>{oos_started_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
             )
         return snapshot
 
@@ -2899,17 +3730,39 @@ if (!attach()) {
             options = [INSTRUMENT_PLACEHOLDER]
 
         current_symbol_1 = symbol_1_select.value if symbol_1_select.value in options else _preferred_symbol_1(options, symbol_1_select.value)
-        symbol_1_select.options = options
+        symbol_1_select.options = _clone_select_options(_symbol_select_options(options))
         if symbol_1_select.value != current_symbol_1:
             symbol_1_select.value = current_symbol_1
+        exact_partner_options = (
+            list(
+                cointegration_candidate_partner_symbols(
+                    broker,
+                    symbol=current_symbol_1,
+                    allowed_symbols={str(option) for option in options if option != INSTRUMENT_PLACEHOLDER},
+                )
+            )
+            if is_cointegration_candidates_group(group_select.value)
+            else None
+        )
 
         if leg_2_filter_select.value == 'all_symbols':
-            symbol_2_select.options = options
-            symbol_2_select.value = _preferred_symbol_2(options, symbol_2_select.value, current_symbol_1)
+            partner_options = exact_partner_options if exact_partner_options is not None else options
+            if not partner_options:
+                symbol_2_select.options = [INSTRUMENT_PLACEHOLDER]
+                symbol_2_select.value = INSTRUMENT_PLACEHOLDER
+                if show_message and is_cointegration_candidates_group(group_select.value):
+                    summary_div.text = (
+                        f"<p>Exact pair list has no eligible partner symbols for <b>{current_symbol_1}</b> "
+                        f"inside <b>{COINTEGRATION_CANDIDATES_GROUP}</b>.</p>"
+                    )
+                return
+            symbol_2_select.options = _clone_select_options(_symbol_select_options(partner_options))
+            symbol_2_select.value = _preferred_symbol_2(partner_options, symbol_2_select.value, current_symbol_1)
             return
 
         if leg_2_filter_select.value == 'co_movers':
-            group_labels = _sync_co_mover_group_options(current_symbol_1, options)
+            partner_universe = exact_partner_options if exact_partner_options is not None else options
+            group_labels = _sync_co_mover_group_options(current_symbol_1, partner_universe)
             if current_symbol_1 == INSTRUMENT_PLACEHOLDER:
                 symbol_2_select.options = [INSTRUMENT_PLACEHOLDER]
                 symbol_2_select.value = INSTRUMENT_PLACEHOLDER
@@ -2925,7 +3778,7 @@ if (!attach()) {
                 return
             partner_options = co_mover_symbols_for_symbol(
                 current_symbol_1,
-                available_symbols=options,
+                available_symbols=partner_universe,
                 group_label=co_mover_group_select.value,
             )
             if not partner_options:
@@ -2937,7 +3790,7 @@ if (!attach()) {
                         f"for <b>{current_symbol_1}</b> inside the current tester universe <b>{group_select.value}</b>.</p>"
                     )
                 return
-            symbol_2_select.options = partner_options
+            symbol_2_select.options = _clone_select_options(_symbol_select_options(partner_options))
             symbol_2_select.value = _preferred_symbol_2(partner_options, symbol_2_select.value, current_symbol_1)
             if show_message:
                 summary_div.text = (
@@ -2953,7 +3806,7 @@ if (!attach()) {
 
         snapshot = load_tester_cointegration_snapshot()
         if snapshot is None:
-            symbol_2_select.options = options
+            symbol_2_select.options = _clone_select_options(_symbol_select_options(options))
             symbol_2_select.value = _preferred_symbol_2(options, symbol_2_select.value, current_symbol_1)
             if show_message:
                 scope_label = group_select.value if group_select.value != 'all' else 'all'
@@ -2963,7 +3816,10 @@ if (!attach()) {
                 )
             return
 
-        partner_options = partner_symbols_from_snapshot(snapshot, symbol_1=current_symbol_1, allowed_symbols=options)
+        allowed_symbols_for_filter = options
+        if exact_partner_options is not None:
+            allowed_symbols_for_filter = [current_symbol_1, *exact_partner_options]
+        partner_options = partner_symbols_from_snapshot(snapshot, symbol_1=current_symbol_1, allowed_symbols=allowed_symbols_for_filter)
         partner_options = [option for option in partner_options if option != current_symbol_1]
         if not partner_options:
             symbol_2_select.options = [INSTRUMENT_PLACEHOLDER]
@@ -2975,7 +3831,7 @@ if (!attach()) {
                 )
             return
 
-        symbol_2_select.options = partner_options
+        symbol_2_select.options = _clone_select_options(_symbol_select_options(partner_options))
         symbol_2_select.value = _preferred_symbol_2(partner_options, symbol_2_select.value, current_symbol_1)
         if show_message:
             summary_div.text = (
@@ -3367,6 +4223,9 @@ if (!targets.length) {
         *,
         selection_label: str,
     ) -> bool:
+        if scanner_is_running():
+            optimization_status_div.text = scanner_busy_message("replaying optimizer rows in tester")
+            return False
         copied, trial_id, tester_period = copy_optimization_trial_to_tester(index)
         if not copied:
             return False
@@ -3458,6 +4317,7 @@ if (!targets.length) {
         tester_ended_at = _coerce_datetime(period_slider.value[1])
         sync_optimization_cutoff_marker(test_started_at=tester_started_at, test_ended_at=tester_ended_at)
         sync_optimization_train_overlay(test_started_at=tester_started_at, test_ended_at=tester_ended_at)
+        restore_saved_scanner_table(show_message=False)
         current_signature = current_optimization_signature()
         if not optimization_outputs_present() or displayed_optimization_signature is None or current_signature is None:
             return
@@ -3480,8 +4340,8 @@ if (!targets.length) {
         scan_run_button.label = "Run Johansen Scan"
         scan_run_button.button_type = "primary"
 
-    def mark_scan_running() -> None:
-        scan_run_button.label = "Scanning..."
+    def mark_scan_running(*, stopping: bool = False) -> None:
+        scan_run_button.label = "Stopping Johansen..." if stopping else "Scanning..."
         scan_run_button.button_type = "warning"
 
     def update_scan_progress(completed: int, total: int, stage: str) -> None:
@@ -3489,12 +4349,320 @@ if (!targets.length) {
         scan_progress["total"] = total
         scan_progress["stage"] = stage
 
+    def update_scan_partial_result(result: JohansenUniverseScanResult) -> None:
+        scan_live_state["result"] = result
+        scan_live_state["version"] = int(scan_live_state.get("version", 0) or 0) + 1
+
+    def selected_scan_row_key() -> tuple[str, str] | None:
+        indices = list(state.scan_source.selected.indices)
+        if not indices:
+            return None
+        index = indices[0]
+        data = state.scan_source.data
+        if index < 0 or index >= len(data.get("symbol_1", [])):
+            return None
+        return (
+            str(data["symbol_1"][index]),
+            str(data["symbol_2"][index]),
+        )
+
+    def scan_row_index_by_key(
+        data: dict[str, list[object]],
+        row_key: tuple[str, str] | None,
+    ) -> int | None:
+        if row_key is None:
+            return None
+        symbol_1, symbol_2 = row_key
+        total = len(data.get("symbol_1", []))
+        for index in range(total):
+            if str(data["symbol_1"][index]) == symbol_1 and str(data["symbol_2"][index]) == symbol_2:
+                return index
+        return None
+
+    def apply_scan_snapshot(result: JohansenUniverseScanResult, *, final: bool) -> None:
+        nonlocal suppress_scan_selection
+        previous_row_key = selected_scan_row_key()
+        next_data = scan_results_to_source(result, passed_only=True)
+        next_selected_index = scan_row_index_by_key(next_data, previous_row_key)
+        suppress_scan_selection = True
+        try:
+            state.scan_source.data = next_data
+            if next_selected_index is None:
+                if final:
+                    state.scan_source.selected.indices = []
+            else:
+                state.scan_source.selected.indices = [next_selected_index]
+        finally:
+            suppress_scan_selection = False
+
     def render_scan_progress() -> None:
         total = int(scan_progress.get("total", 0) or 0)
         completed = int(scan_progress.get("completed", 0) or 0)
         stage = str(scan_progress.get("stage", "Johansen scan"))
+        workers = int(scan_progress.get("workers", scan_parallel_workers) or scan_parallel_workers)
+        started_monotonic = scan_progress.get("started_monotonic")
+        eta_label = "n/a"
+        if total > 0 and completed > 0 and isinstance(started_monotonic, (int, float)):
+            elapsed = max(0.0, monotonic() - float(started_monotonic))
+            rate = completed / elapsed if elapsed > 1e-9 else 0.0
+            remaining = max(0, total - completed)
+            if rate > 1e-9:
+                eta_label = _format_compact_duration(remaining / rate)
         if total > 0:
-            scan_status_div.text = f"<p>{stage}: <b>{completed}</b> / <b>{total}</b> using <b>{scan_parallel_workers}</b> workers.</p>"
+            stop_suffix = " Stop requested..." if scan_cancel_event.is_set() else ""
+            scan_status_div.text = (
+                f"<p>{stage}: <b>{completed}</b> / <b>{total}</b> using <b>{workers}</b> workers. "
+                f"ETA: <b>{eta_label}</b>.{stop_suffix}</p>"
+            )
+
+    def reset_scanner_button() -> None:
+        scanner_run_button.label = "Run Scanner"
+        scanner_run_button.button_type = "primary"
+
+    def mark_scanner_running(*, stopping: bool = False) -> None:
+        scanner_run_button.label = "Stopping Scanner..." if stopping else "Running Scanner..."
+        scanner_run_button.button_type = "warning"
+
+    def update_scanner_progress(completed: int, total: int, stage: str) -> None:
+        scanner_progress["completed"] = completed
+        scanner_progress["total"] = total
+        scanner_progress["stage"] = stage
+
+    def update_scanner_partial_result(result: OptimizerGridScanResult) -> None:
+        scanner_live_state["result"] = result
+        scanner_live_state["version"] = int(scanner_live_state.get("version", 0) or 0) + 1
+
+    def selected_scanner_row_key() -> tuple[str, str, str, int, int] | None:
+        indices = list(scanner_table_source.selected.indices)
+        if not indices:
+            return None
+        index = indices[0]
+        data = scanner_table_source.data
+        if index < 0 or index >= len(data.get("trial_id", [])):
+            return None
+        return (
+            str((data.get("universe_scope") or [""])[index]),
+            str(data["symbol_1"][index]),
+            str(data["symbol_2"][index]),
+            int(data["pair_rank"][index]),
+            int(data["trial_id"][index]),
+        )
+
+    def scanner_row_index_by_key(
+        data: dict[str, list[object]],
+        row_key: tuple[str, str, str, int, int] | None,
+    ) -> int | None:
+        if row_key is None:
+            return None
+        universe_scope, symbol_1, symbol_2, pair_rank, trial_id = row_key
+        total = len(data.get("trial_id", []))
+        for index in range(total):
+            if (
+                str((data.get("universe_scope") or [""])[index]) == universe_scope
+                and
+                str(data["symbol_1"][index]) == symbol_1
+                and str(data["symbol_2"][index]) == symbol_2
+                and int(data["pair_rank"][index]) == pair_rank
+                and int(data["trial_id"][index]) == trial_id
+            ):
+                return index
+        return None
+
+    def apply_scanner_snapshot(result: OptimizerGridScanResult, *, final: bool) -> None:
+        nonlocal suppress_scanner_selection
+        previous_row_key = selected_scanner_row_key()
+        next_data = optimizer_scan_results_to_source(result)
+        next_selected_index = scanner_row_index_by_key(next_data, previous_row_key)
+        suppress_scanner_selection = True
+        try:
+            scanner_table_source.data = next_data
+            if next_selected_index is None:
+                if not final:
+                    scanner_table_source.selected.indices = []
+            else:
+                scanner_table_source.selected.indices = [next_selected_index]
+        finally:
+            suppress_scanner_selection = False
+
+    def render_scanner_progress() -> None:
+        total = int(scanner_progress.get("total", 0) or 0)
+        completed = int(scanner_progress.get("completed", 0) or 0)
+        stage = str(scanner_progress.get("stage", "Scanner"))
+        workers = int(scanner_progress.get("workers", scanner_parallel_workers) or scanner_parallel_workers)
+        remaining = max(0, total - completed)
+        started_monotonic = scanner_progress.get("started_monotonic")
+        elapsed_label = "n/a"
+        eta_suffix = ""
+        if isinstance(started_monotonic, (int, float)):
+            elapsed_seconds = max(0.0, monotonic() - float(started_monotonic))
+            elapsed_label = _format_compact_duration(elapsed_seconds)
+            if completed > 0 and total > completed:
+                eta_seconds = elapsed_seconds * (remaining / max(completed, 1))
+                eta_suffix = f", ETA ~ <b>{_format_compact_duration(eta_seconds)}</b>"
+        partial_result = scanner_live_state.get("result")
+        partial_rows = 0
+        if isinstance(partial_result, OptimizerGridScanResult):
+            partial_rows = int(partial_result.summary.total_rows)
+        if total > 0:
+            stop_prefix = "Stop requested. " if scanner_cancel_event.is_set() else ""
+            scanner_status_div.text = (
+                f"<p>{stop_prefix}{stage}: <b>{completed}</b> / <b>{total}</b> pairs processed, "
+                f"remaining: <b>{remaining}</b>, rows kept: <b>{partial_rows}</b>, elapsed: <b>{elapsed_label}</b>{eta_suffix}, "
+                f"workers: <b>{workers}</b>.</p>"
+            )
+
+    def persist_scanner_result_snapshot(
+        *,
+        scope_label: str,
+        search_signature: str,
+        timeframe: Timeframe,
+        train_period: tuple[datetime, datetime],
+        oos_started_at: datetime,
+        defaults: StrategyDefaults,
+        search_space: dict[str, object],
+        fee_mode: str,
+        result: OptimizerGridScanResult,
+    ) -> None:
+        persist_optimizer_scanner_snapshot(
+            broker=broker,
+            timeframe=timeframe,
+            train_started_at=train_period[0],
+            train_ended_at=train_period[1],
+            oos_started_at=oos_started_at,
+            scope=scope_label,
+            search_signature=search_signature,
+            defaults=defaults,
+            search_space=search_space,
+            fee_mode=fee_mode,
+            result=result,
+        )
+
+    def estimate_scanner_eta() -> None:
+        if scanner_is_running():
+            scanner_status_div.text = scanner_busy_message("estimating Scanner ETA")
+            return
+        blocking_label = running_heavy_job_label(exclude="scanner")
+        if blocking_label is not None:
+            scanner_status_div.text = f"<p>{blocking_label} is still running. Wait for it to finish before estimating Scanner ETA.</p>"
+            return
+        train_period = current_scanner_train_period()
+        if train_period is None:
+            scanner_status_div.text = (
+                "<p>Scanner train history is empty. Move the <b>Optimization Period</b> end later so OOS starts after at least one bar of train data.</p>"
+            )
+            return
+        search_space = scanner_search_space()
+        trials_per_pair = count_distance_parameter_grid(search_space)
+        if trials_per_pair <= 0:
+            scanner_status_div.text = (
+                "<p>Scanner ETA estimate is unavailable because the current Scanner grid produced "
+                "<b>0</b> valid parameter combinations.</p>"
+            )
+            return
+        view_scope = current_scanner_view_scope_label()
+        search_signature = current_scanner_request_signature(train_period=train_period, search_space=search_space)
+        if not search_signature:
+            scanner_status_div.text = "<p>Scanner ETA estimate is unavailable for the current configuration.</p>"
+            return
+        scope_jobs = build_selected_scanner_scope_jobs(search_signature=search_signature)
+        if view_scope is None and not scope_jobs:
+            scanner_status_div.text = (
+                "<p><b>Universe = all</b> has no concrete catalog groups available right now. "
+                "Refresh instruments first, then estimate Scanner ETA again.</p>"
+            )
+            return
+        scope_jobs_with_pairs = [job for job in scope_jobs if int(job["pair_count"]) > 0]
+        scope_label = view_scope or "all available universes"
+        pair_source_label = current_scanner_pair_source_label()
+        symbol_count = sum(int(job["symbol_count"]) for job in scope_jobs)
+        pair_count = sum(int(job["pair_count"]) for job in scope_jobs_with_pairs)
+        completed_pairs = sum(
+            int(job["cached_pairs"])
+            for job in scope_jobs_with_pairs
+            if isinstance(job.get("resume_result"), OptimizerGridScanResult)
+        )
+        remaining_pairs = max(0, pair_count - completed_pairs)
+        oos_started_at = current_optimizer_oos_started_at()
+        train_label = f"<b>{train_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{train_period[1]:%Y-%m-%d %H:%M} UTC</b>"
+        if symbol_count < 2 or pair_count <= 0:
+            scanner_status_div.text = (
+                f"<p>Scanner ETA estimate for <b>{scope_label}</b>: only <b>{symbol_count}</b> symbols are available, "
+                f"so there are no pair combinations to scan for pair source <b>{pair_source_label}</b>. Train: {train_label}. "
+                f"OOS starts at <b>{oos_started_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            )
+            return
+        total_trials = pair_count * trials_per_pair
+        remaining_trials = remaining_pairs * trials_per_pair
+        defaults = build_defaults()
+        fee_mode = str(bybit_fee_mode_select.value or "")
+        probe_eta_seconds: float | None = None
+        probe_elapsed_seconds: float | None = None
+        probe_scope_label: str | None = None
+        probe_pair_label: str | None = None
+        timeframe = Timeframe(timeframe_select.value)
+        for job in scope_jobs_with_pairs:
+            processed_pair_keys = set(job["processed_pair_keys"]) if isinstance(job.get("resume_result"), OptimizerGridScanResult) else set()
+            allowed_pairs = [str(item) for item in (job.get("allowed_pair_keys") or []) if str(item)]
+            probe_candidates = (
+                [tuple(str(item).split("::", 1)) for item in allowed_pairs]
+                if allowed_pairs
+                else list(combinations(list(job["symbols"]), 2))
+            )
+            for symbol_1, symbol_2 in probe_candidates:
+                if f"{symbol_1}::{symbol_2}" in processed_pair_keys:
+                    continue
+                probe_started = monotonic()
+                try:
+                    probe_result = scan_universe_optimizer_grid(
+                        broker=broker,
+                        timeframe=timeframe,
+                        started_at=train_period[0],
+                        ended_at=train_period[1],
+                        universe_mode=ScanUniverseMode.MANUAL,
+                        symbols=[symbol_1, symbol_2],
+                        defaults=defaults,
+                        search_space=search_space,
+                        fee_mode=fee_mode,
+                        min_r_squared=0.9,
+                        top_n_per_pair=10,
+                        parallel_workers=scanner_parallel_workers,
+                        universe_scope=str(job["scope_label"]),
+                        allowed_pair_keys=[f"{symbol_1}::{symbol_2}"],
+                    )
+                except Exception:
+                    continue
+                probe_elapsed = max(0.0, monotonic() - probe_started)
+                if int(probe_result.summary.pairs_with_data or 0) <= 0 or int(probe_result.summary.total_pair_candidates or 0) <= 0:
+                    continue
+                probe_elapsed_seconds = probe_elapsed
+                probe_eta_seconds = probe_elapsed * remaining_pairs
+                probe_scope_label = str(job["scope_label"])
+                probe_pair_label = f"{symbol_1} / {symbol_2}"
+                break
+            if probe_eta_seconds is not None:
+                break
+        fallback_eta_seconds = estimate_scanner_runtime_seconds(
+            pair_count=pair_count,
+            trials_per_pair=trials_per_pair,
+            workers=scanner_parallel_workers,
+            completed_pairs=completed_pairs,
+        )
+        eta_seconds = probe_eta_seconds if probe_eta_seconds is not None else fallback_eta_seconds
+        probe_suffix = (
+            f" Probe pair <b>{probe_pair_label}</b> from <b>{probe_scope_label}</b> took "
+            f"<b>{_format_compact_duration(probe_elapsed_seconds or 0.0)}</b>."
+            if probe_eta_seconds is not None
+            else " No aligned probe pair was available, so the estimate falls back to the rough runtime model."
+        )
+        scanner_status_div.text = (
+            f"<p>Scanner ETA estimate for <b>{scope_label}</b>: symbols <b>{symbol_count}</b>, pairs <b>{pair_count}</b>, "
+            f"resumable cached pairs <b>{completed_pairs}</b>, remaining pairs <b>{remaining_pairs}</b>, "
+            f"pair source <b>{pair_source_label}</b>, "
+            f"grid <b>{trials_per_pair}</b> valid combinations per pair, total trials ~ <b>{total_trials:,}</b>, "
+            f"remaining trials ~ <b>{remaining_trials:,}</b>, workers <b>{scanner_parallel_workers}</b>, "
+            f"ETA ~ <b>{_format_compact_duration(eta_seconds)}</b>.{probe_suffix} "
+            f"Train: {train_label}. OOS starts at <b>{oos_started_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+        )
 
     def reset_download_button() -> None:
         download_run_button.label = "Run Download"
@@ -3520,8 +4688,8 @@ if (!targets.length) {
         wfa_run_button.label = "Run WFA"
         wfa_run_button.button_type = "primary"
 
-    def mark_wfa_running() -> None:
-        wfa_run_button.label = "Running WFA..."
+    def mark_wfa_running(*, stopping: bool = False) -> None:
+        wfa_run_button.label = "Stopping WFA..." if stopping else "Running WFA..."
         wfa_run_button.button_type = "warning"
 
     def update_wfa_progress(completed: int, total: int, stage: str) -> None:
@@ -3651,11 +4819,58 @@ if (!targets.length) {
             return None
         return str(item_ids[index])
 
-    def build_portfolio_curve_source_data(curve: PortfolioCurve) -> dict[str, list[object]]:
+    def build_portfolio_source_data(
+        *,
+        times: list[datetime],
+        equities: list[float],
+        unrealized_drawdowns: list[float],
+        capital_loads: list[float],
+        open_positions: list[int],
+        initial_capital: float,
+    ) -> dict[str, list[object]]:
+        safe_capital = max(abs(float(initial_capital)), 1e-9)
         return {
-            "time": [_datetime_to_bokeh_millis(moment) for moment in curve.times],
-            "equity": curve.equities,
+            "time": [_datetime_to_bokeh_millis(moment) for moment in times],
+            "equity": [float(value) for value in equities],
+            "unrealized_drawdown": [float(value) for value in unrealized_drawdowns],
+            "unrealized_drawdown_top": [0.0] * len(times),
+            "capital_load": [float(value) for value in capital_loads],
+            "capital_load_pct": [float(value) / safe_capital * 100.0 for value in capital_loads],
+            "open_positions": [int(value) for value in open_positions],
         }
+
+    def update_portfolio_metrics_summary(
+        *,
+        label: str,
+        times: list[datetime],
+        equities: list[float],
+        unrealized_drawdowns: list[float],
+        capital_loads: list[float],
+        open_positions: list[int],
+        trades_count: int,
+    ) -> None:
+        if not times or not equities:
+            portfolio_metrics_div.text = _format_portfolio_metrics_line(None, label=label)
+            return
+        summary = summarize_portfolio_equity_series(
+            times=times,
+            equities=equities,
+            unrealized_drawdowns=unrealized_drawdowns,
+            capital_loads=capital_loads,
+            open_positions=open_positions,
+            trades_count=trades_count,
+        )
+        portfolio_metrics_div.text = _format_portfolio_metrics_line(summary, label=label)
+
+    def build_portfolio_curve_source_data(curve: PortfolioCurve) -> dict[str, list[object]]:
+        return build_portfolio_source_data(
+            times=curve.times,
+            equities=curve.equities,
+            unrealized_drawdowns=curve.unrealized_drawdowns,
+            capital_loads=curve.capital_loads,
+            open_positions=curve.open_positions,
+            initial_capital=curve.initial_capital,
+        )
 
     def portfolio_curve_source_data(curve: PortfolioCurve) -> dict[str, list[object]]:
         cached = portfolio_curve_sources_by_id.get(curve.item_id)
@@ -3681,12 +4896,22 @@ if (!targets.length) {
         oos_started_at: datetime | None,
     ) -> None:
         source_data = portfolio_curve_source_data(curve)
+        row = portfolio_run_rows_by_id.get(curve.item_id)
         doc.hold("combine")
         try:
             portfolio_equity_plot.title.text = title
             portfolio_equity_source.data = source_data
             refresh_portfolio_equity_ranges(source_data=source_data)
             sync_portfolio_oos_cutoff_marker(oos_started_at)
+            update_portfolio_metrics_summary(
+                label=title,
+                times=curve.times,
+                equities=curve.equities,
+                unrealized_drawdowns=curve.unrealized_drawdowns,
+                capital_loads=curve.capital_loads,
+                open_positions=curve.open_positions,
+                trades_count=0 if row is None or row.trades is None else int(row.trades),
+            )
         finally:
             doc.unhold()
 
@@ -3702,17 +4927,40 @@ if (!targets.length) {
             clear_portfolio_equity_outputs()
             return
         active_items = [item for item_id, item in portfolio_items_by_id.items() if item_id in active_ids]
-        source_data = {
-            "time": [_datetime_to_bokeh_millis(moment) for moment in combined.get_column("time").to_list()],
-            "equity": [float(value) for value in combined.get_column("equity").to_list()],
-        }
+        combined_times = list(combined.get_column("time").to_list())
+        combined_equity = [float(value) for value in combined.get_column("equity").to_list()]
+        combined_unrealized_drawdown = [float(value) for value in combined.get_column("unrealized_drawdown").to_list()]
+        combined_capital_load = [float(value) for value in combined.get_column("capital_load").to_list()]
+        combined_open_positions = [int(value) for value in combined.get_column("open_positions").to_list()]
+        source_data = build_portfolio_source_data(
+            times=combined_times,
+            equities=combined_equity,
+            unrealized_drawdowns=combined_unrealized_drawdown,
+            capital_loads=combined_capital_load,
+            open_positions=combined_open_positions,
+            initial_capital=float(combined_equity[0]) if combined_equity else 0.0,
+        )
         latest_oos_started_at = latest_portfolio_oos_started_at(active_items)
+        total_trades = sum(
+            int(row.trades or 0)
+            for item_id, row in portfolio_run_rows_by_id.items()
+            if item_id in active_ids and row.trades is not None
+        )
         doc.hold("combine")
         try:
             portfolio_equity_plot.title.text = portfolio_equity_base_title
             portfolio_equity_source.data = source_data
             refresh_portfolio_equity_ranges(source_data=source_data)
             sync_portfolio_oos_cutoff_marker(latest_oos_started_at)
+            update_portfolio_metrics_summary(
+                label="Portfolio",
+                times=combined_times,
+                equities=combined_equity,
+                unrealized_drawdowns=combined_unrealized_drawdown,
+                capital_loads=combined_capital_load,
+                open_positions=combined_open_positions,
+                trades_count=total_trades,
+            )
         finally:
             doc.unhold()
 
@@ -3733,11 +4981,22 @@ if (!targets.length) {
 
     def clear_portfolio_equity_outputs() -> None:
         portfolio_equity_plot.title.text = portfolio_equity_base_title
-        portfolio_equity_source.data = {"time": [], "equity": []}
+        portfolio_equity_source.data = empty_portfolio_equity_source_data()
+        portfolio_metrics_div.text = _format_portfolio_metrics_line(None, label="Portfolio")
         portfolio_oos_cutoff_span.visible = False
         set_portfolio_x_range(_datetime_to_bokeh_millis(history_start), _datetime_to_bokeh_millis(now_utc))
-        portfolio_equity_plot.y_range.start = 0.0
-        portfolio_equity_plot.y_range.end = 1.0
+        portfolio_equity_plot.y_range.start = -1.0
+        portfolio_equity_plot.y_range.end = 0.0
+        portfolio_equity_plot.extra_y_ranges["equity"].start = 0.0
+        portfolio_equity_plot.extra_y_ranges["equity"].end = 1.0
+
+    def reset_portfolio_button() -> None:
+        portfolio_run_button.label = "Run Portfolio"
+        portfolio_run_button.button_type = "primary"
+
+    def mark_portfolio_running() -> None:
+        portfolio_run_button.label = "Running Portfolio..."
+        portfolio_run_button.button_type = "warning"
 
     def clear_portfolio_analysis_outputs() -> None:
         portfolio_weight_source.data = empty_portfolio_weight_data()
@@ -3756,6 +5015,7 @@ if (!targets.length) {
         data = source_data if source_data is not None else portfolio_equity_source.data
         times = list(data.get("time", []))
         equities = [float(value) for value in data.get("equity", [])]
+        unrealized_drawdowns = [float(value) for value in data.get("unrealized_drawdown", [])]
         if not times or not equities:
             clear_portfolio_equity_outputs()
             return
@@ -3770,31 +5030,47 @@ if (!targets.length) {
             set_portfolio_x_range(full_x_start, full_x_end)
             visible_x_start = full_x_start
             visible_x_end = full_x_end
-            y_low = min(equities)
-            y_high = max(equities)
+            equity_low = min(equities)
+            equity_high = max(equities)
+            risk_low = min(unrealized_drawdowns) if unrealized_drawdowns else -1.0
         else:
             visible_x_start = portfolio_equity_plot.x_range.start
             visible_x_end = portfolio_equity_plot.x_range.end
             if visible_x_start is None or visible_x_end is None:
                 visible_x_start = full_x_start
                 visible_x_end = full_x_end
-            y_low, y_high = compute_series_bounds(
+            equity_low, equity_high = compute_series_bounds(
                 times,
                 [equities],
                 visible_x_start,
                 visible_x_end,
                 pad_ratio=0.08,
             )
+            risk_low, _risk_high = compute_series_bounds(
+                times,
+                [unrealized_drawdowns],
+                visible_x_start,
+                visible_x_end,
+                pad_ratio=0.08,
+                fallback=(-1.0, 0.0),
+            )
         if reset_x_range:
-            if abs(y_high - y_low) <= 1e-9:
-                y_high = y_low + 1.0
-            padding = max(1.0, (y_high - y_low) * 0.08)
-            y_low -= padding
-            y_high += padding
-        if abs(y_high - y_low) <= 1e-9:
-            y_high = y_low + 1.0
-        portfolio_equity_plot.y_range.start = y_low
-        portfolio_equity_plot.y_range.end = y_high
+            if abs(equity_high - equity_low) <= 1e-9:
+                equity_high = equity_low + 1.0
+            equity_padding = max(1.0, (equity_high - equity_low) * 0.08)
+            equity_low -= equity_padding
+            equity_high += equity_padding
+        if abs(equity_high - equity_low) <= 1e-9:
+            equity_high = equity_low + 1.0
+        portfolio_equity_plot.extra_y_ranges["equity"].start = equity_low
+        portfolio_equity_plot.extra_y_ranges["equity"].end = equity_high
+        risk_start = float(risk_low)
+        if abs(risk_start) <= 1e-9:
+            risk_start = -1.0
+        else:
+            risk_start *= 1.08
+        portfolio_equity_plot.y_range.start = min(risk_start, -1e-6)
+        portfolio_equity_plot.y_range.end = 0.0
 
     def sync_portfolio_oos_cutoff_marker(oos_started_at: datetime | None) -> None:
         if oos_started_at is None:
@@ -3803,6 +5079,16 @@ if (!targets.length) {
         portfolio_oos_cutoff_span.location = oos_started_at
         portfolio_oos_cutoff_span.visible = True
 
+    def clear_portfolio_poll_callback() -> None:
+        nonlocal portfolio_poll_callback
+        if portfolio_poll_callback is None:
+            return
+        try:
+            doc.remove_periodic_callback(portfolio_poll_callback)
+        except ValueError:
+            pass
+        portfolio_poll_callback = None
+
     def run_portfolio_backtests(
         items: list,
         *,
@@ -3810,6 +5096,7 @@ if (!targets.length) {
         ended_at: datetime,
         allocation_capitals_by_id: dict[str, float],
         included_item_ids: set[str] | None = None,
+        use_in_sample_only: bool = False,
     ) -> tuple[list[PortfolioCurve], dict[str, PortfolioRunRow], int, int]:
         current_fee_mode = str(bybit_fee_mode_select.value or settings.bybit_tradfi_fee_mode)
         curves: list[PortfolioCurve] = []
@@ -3820,22 +5107,63 @@ if (!targets.length) {
         try:
             for item in items:
                 allocation_capital = max(float(allocation_capitals_by_id.get(item.item_id, 0.0) or 0.0), 0.0)
-                if allocation_capital <= 0.0:
-                    allocation_capital = 0.0
+                effective_capital = allocation_capital if allocation_capital > 0.0 else float(item.initial_capital)
                 os.environ["MT_SERVICE_BYBIT_TRADFI_FEE_MODE"] = str(item.fee_mode or current_fee_mode)
                 get_settings.cache_clear()
-                defaults = scale_defaults_for_portfolio_item(item, float(item.initial_capital))
-                strategy_started_at = portfolio_strategy_started_at(
-                    item,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                )
+                defaults = scale_defaults_for_portfolio_item(item, effective_capital)
+                if use_in_sample_only:
+                    strategy_started_at, strategy_ended_at = portfolio_analysis_window(
+                        item,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                    )
+                else:
+                    strategy_started_at = portfolio_strategy_started_at(
+                        item,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                    )
+                    strategy_ended_at = ended_at
+                if strategy_ended_at <= strategy_started_at:
+                    no_data_count += 1
+                    curves.append(
+                        PortfolioCurve(
+                            item_id=item.item_id,
+                            symbol_1=item.symbol_1,
+                            symbol_2=item.symbol_2,
+                            timeframe=item.timeframe.value,
+                            initial_capital=defaults.initial_capital,
+                            times=[],
+                            equities=[],
+                            unrealized_drawdowns=[],
+                            capital_loads=[],
+                            open_positions=[],
+                        )
+                    )
+                    next_rows[item.item_id] = PortfolioRunRow(
+                        item_id=item.item_id,
+                        symbol_1=item.symbol_1,
+                        symbol_2=item.symbol_2,
+                        timeframe=item.timeframe.value,
+                        allocation_capital=allocation_capital,
+                        net_profit=None,
+                        ending_equity=None,
+                        max_drawdown=None,
+                        trades=None,
+                        cagr=None,
+                        cagr_to_ulcer=None,
+                        r_squared=None,
+                        calmar=None,
+                        beauty_score=None,
+                        status="no_data",
+                    )
+                    continue
                 result = run_distance_backtest(
                     broker=broker,
                     pair=PairSelection(symbol_1=item.symbol_1, symbol_2=item.symbol_2),
                     timeframe=item.timeframe,
                     started_at=strategy_started_at,
-                    ended_at=ended_at,
+                    ended_at=strategy_ended_at,
                     defaults=defaults,
                     params=item.params(),
                 )
@@ -3850,6 +5178,9 @@ if (!targets.length) {
                             initial_capital=defaults.initial_capital,
                             times=[],
                             equities=[],
+                            unrealized_drawdowns=[],
+                            capital_loads=[],
+                            open_positions=[],
                         )
                     )
                     next_rows[item.item_id] = PortfolioRunRow(
@@ -3862,18 +5193,51 @@ if (!targets.length) {
                         ending_equity=None,
                         max_drawdown=None,
                         trades=None,
+                        cagr=None,
+                        cagr_to_ulcer=None,
+                        r_squared=None,
+                        calmar=None,
+                        beauty_score=None,
                         status="no_data",
                     )
                     continue
                 frame = result.frame
-                curve_times = list(frame.get_column("time").to_list())
+                raw_curve_times = list(frame.get_column("time").to_list())
+                curve_times = list(raw_curve_times)
                 curve_equities = [float(value) for value in frame.get_column("equity_total").to_list()]
+                curve_positions = [int(value) for value in frame.get_column("position").to_list()]
+                curve_unrealized_drawdowns, curve_capital_loads, curve_open_positions = derive_portfolio_curve_risk_series(
+                    curve_equities,
+                    curve_positions,
+                    margin_budget_per_leg=float(defaults.margin_budget_per_leg),
+                )
                 curve_times, curve_equities = prepend_flat_equity_prefix(
                     curve_times,
                     curve_equities,
                     period_started_at=started_at,
                     strategy_started_at=strategy_started_at,
                     initial_capital=defaults.initial_capital,
+                )
+                curve_unrealized_drawdowns = prepend_constant_series_prefix(
+                    raw_curve_times,
+                    curve_unrealized_drawdowns,
+                    period_started_at=started_at,
+                    strategy_started_at=strategy_started_at,
+                    fill_value=0.0,
+                )
+                curve_capital_loads = prepend_constant_series_prefix(
+                    raw_curve_times,
+                    curve_capital_loads,
+                    period_started_at=started_at,
+                    strategy_started_at=strategy_started_at,
+                    fill_value=0.0,
+                )
+                curve_open_positions = prepend_constant_series_prefix(
+                    raw_curve_times,
+                    curve_open_positions,
+                    period_started_at=started_at,
+                    strategy_started_at=strategy_started_at,
+                    fill_value=0,
                 )
                 curves.append(
                     PortfolioCurve(
@@ -3884,6 +5248,9 @@ if (!targets.length) {
                         initial_capital=defaults.initial_capital,
                         times=curve_times,
                         equities=curve_equities,
+                        unrealized_drawdowns=[float(value) for value in curve_unrealized_drawdowns],
+                        capital_loads=[float(value) for value in curve_capital_loads],
+                        open_positions=[int(value) for value in curve_open_positions],
                     )
                 )
                 summary = result.summary
@@ -3897,12 +5264,80 @@ if (!targets.length) {
                     ending_equity=float(summary.get("ending_equity", defaults.initial_capital) or defaults.initial_capital),
                     max_drawdown=float(summary.get("max_drawdown", 0.0) or 0.0),
                     trades=int(summary.get("trades", 0) or 0),
+                    cagr=float(summary.get("cagr", 0.0) or 0.0),
+                    cagr_to_ulcer=float(summary.get("cagr_to_ulcer", 0.0) or 0.0),
+                    r_squared=float(summary.get("r_squared", 0.0) or 0.0),
+                    calmar=float(summary.get("calmar", 0.0) or 0.0),
+                    beauty_score=float(summary.get("beauty_score", 0.0) or 0.0),
                     status="ok",
                 )
         finally:
             os.environ["MT_SERVICE_BYBIT_TRADFI_FEE_MODE"] = current_fee_mode
             get_settings.cache_clear()
         return curves, next_rows, no_data_count, excluded_count
+
+    def run_portfolio_job(
+        items: list,
+        *,
+        started_at: datetime,
+        ended_at: datetime,
+        total_capital: float,
+        allocation_mode: str,
+        active_ids: set[str],
+    ) -> dict[str, object]:
+        equal_allocation = total_capital / float(len(active_ids))
+        final_allocation_by_id = {
+            item.item_id: (equal_allocation if item.item_id in active_ids else 0.0)
+            for item in items
+        }
+        final_mode_label = "equal_weight"
+        no_data_count = 0
+        excluded_count = max(0, len(items) - len(active_ids))
+
+        if allocation_mode == "diversified_risk":
+            provisional_curves, _rows, provisional_no_data_count, _ignored_excluded_count = run_portfolio_backtests(
+                items,
+                started_at=started_at,
+                ended_at=ended_at,
+                allocation_capitals_by_id=final_allocation_by_id,
+                included_item_ids=active_ids,
+                use_in_sample_only=True,
+            )
+            active_provisional_curves = [curve for curve in provisional_curves if curve.item_id in active_ids]
+            _pairwise_rows, suggestion_rows = analyze_portfolio_curves(active_provisional_curves)
+            if suggestion_rows:
+                final_allocation_by_id = {item.item_id: 0.0 for item in items}
+                for row in suggestion_rows:
+                    final_allocation_by_id[row.item_id] = total_capital * float(row.suggested_weight)
+                final_mode_label = "diversified_risk"
+            else:
+                final_mode_label = "equal_weight (fallback)"
+            no_data_count = provisional_no_data_count
+
+        curves, next_rows, run_no_data_count, _ignored_excluded_count = run_portfolio_backtests(
+            items,
+            started_at=started_at,
+            ended_at=ended_at,
+            allocation_capitals_by_id=final_allocation_by_id,
+            included_item_ids=active_ids,
+        )
+        no_data_count = max(no_data_count, run_no_data_count)
+        has_active_curve = any(curve.times and curve.equities for curve in curves if curve.item_id in active_ids)
+        return {
+            "curves": curves,
+            "rows": next_rows,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "total_capital": total_capital,
+            "allocation_mode": allocation_mode,
+            "final_mode_label": final_mode_label,
+            "active_ids": set(active_ids),
+            "items_count": len(items),
+            "equal_allocation": equal_allocation,
+            "excluded_count": excluded_count,
+            "no_data_count": no_data_count,
+            "has_active_curve": has_active_curve,
+        }
 
     def refresh_portfolio_analysis(
         curves: list[PortfolioCurve],
@@ -3923,6 +5358,7 @@ if (!targets.length) {
         portfolio_analysis_div.text = (
             f"<p>Portfolio analysis finished on <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
             f"`equity_corr` is Pearson correlation of normalized equity curves. `return_corr` is Pearson correlation of aligned equity returns. "
+            f"For contextual rows, the analysis window is clipped to <b>in-sample only</b>, strictly before each row's OOS start when available. "
             f"The recommended second allocation mode is <b>diversified_risk</b>: weight = "
             f"<b>1 / (return volatility * (1 + mean |return correlation|))</b>, normalized to 100%.</p>"
         )
@@ -4020,6 +5456,12 @@ if (!targets.length) {
         refresh_portfolio_table(status_text=f"<p>Removed <b>{removed}</b> selected portfolio row(s).</p>")
 
     def on_analyze_portfolio() -> None:
+        if scanner_is_running():
+            portfolio_analysis_div.text = scanner_busy_message("running portfolio analysis")
+            return
+        if portfolio_future is not None and not portfolio_future.done():
+            portfolio_analysis_div.text = "<p>Portfolio run is still in progress. Wait for it to finish before analysis.</p>"
+            return
         items = load_portfolio_items()
         if not items:
             clear_portfolio_analysis_outputs()
@@ -4042,24 +5484,111 @@ if (!targets.length) {
             item.item_id: (equal_allocation if item.item_id in active_ids else 0.0)
             for item in items
         }
-        curves, _rows, no_data_count, _ignored_excluded_count = run_portfolio_backtests(
+        curves, next_rows, no_data_count, _ignored_excluded_count = run_portfolio_backtests(
             items,
             started_at=started_at,
             ended_at=ended_at,
             allocation_capitals_by_id=active_allocation,
             included_item_ids=active_ids,
+            use_in_sample_only=True,
         )
+        portfolio_run_rows_by_id.clear()
+        portfolio_run_rows_by_id.update(next_rows)
+        portfolio_curves_by_id.clear()
+        portfolio_curve_sources_by_id.clear()
+        portfolio_curves_by_id.update({curve.item_id: curve for curve in curves})
         active_curves = [curve for curve in curves if curve.item_id in active_ids]
         suggestions = refresh_portfolio_analysis(active_curves, started_at=started_at, ended_at=ended_at)
+        refresh_portfolio_table(
+            preserve_selected_item_id=portfolio_preview_item_id,
+            status_text=(
+                f"<p>Portfolio analysis finished on <b>in-sample only</b> windows for <b>{len(items)}</b> saved pair(s) on "
+                f"<b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
+                f"Baseline equal slice: <b>{equal_allocation:.2f}</b>. "
+                f"Valid suggestion rows: <b>{len(suggestions)}</b>. Missing data rows: <b>{no_data_count}</b>. "
+                f"Rows excluded from combined equity: <b>{excluded_count}</b>.</p>"
+            ),
+        )
+        sync_portfolio_equity_view()
         portfolio_status_div.text = (
-            f"<p>Portfolio analysis finished for <b>{len(items)}</b> saved pair(s). "
-            f"Provisional equal allocation per pair: <b>{equal_allocation:.2f}</b>. "
+            f"<p>Portfolio analysis finished on <b>in-sample only</b> windows for <b>{len(items)}</b> saved pair(s). "
             f"Valid suggestion rows: <b>{len(suggestions)}</b>. Missing data rows: <b>{no_data_count}</b>. "
             f"Rows excluded from combined equity: <b>{excluded_count}</b>.</p>"
         )
 
+    def poll_portfolio_future() -> None:
+        nonlocal portfolio_future, portfolio_run_rows_by_id, portfolio_preview_item_id
+        if portfolio_future is None:
+            return
+        if not portfolio_future.done():
+            return
+
+        future = portfolio_future
+        portfolio_future = None
+        clear_portfolio_poll_callback()
+        reset_portfolio_button()
+
+        try:
+            payload = future.result()
+        except Exception as exc:  # pragma: no cover - runtime UI path
+            portfolio_status_div.text = f"<p>Portfolio run failed: {exc}</p>"
+            return
+
+        curves = list(payload.get("curves") or [])
+        next_rows = dict(payload.get("rows") or {})
+        started_at = payload.get("started_at")
+        ended_at = payload.get("ended_at")
+        total_capital = float(payload.get("total_capital") or 0.0)
+        final_mode_label = str(payload.get("final_mode_label") or "equal_weight")
+        active_ids = set(payload.get("active_ids") or set())
+        items_count = int(payload.get("items_count") or 0)
+        equal_allocation = float(payload.get("equal_allocation") or 0.0)
+        excluded_count = int(payload.get("excluded_count") or 0)
+        no_data_count = int(payload.get("no_data_count") or 0)
+        has_active_curve = bool(payload.get("has_active_curve"))
+
+        portfolio_run_rows_by_id = next_rows
+        portfolio_curves_by_id.clear()
+        portfolio_curve_sources_by_id.clear()
+        portfolio_curves_by_id.update({curve.item_id: curve for curve in curves})
+        if not has_active_curve:
+            portfolio_preview_item_id = None
+            clear_portfolio_equity_outputs()
+            refresh_portfolio_table(
+                status_text=(
+                    f"<p>Portfolio run found no aligned data for active rows on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
+                    f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+                ) if isinstance(started_at, datetime) and isinstance(ended_at, datetime) else "<p>Portfolio run found no aligned data for active rows.</p>"
+            )
+            return
+        active_curves = [curve for curve in curves if curve.item_id in active_ids]
+        refresh_portfolio_analysis(active_curves, started_at=started_at, ended_at=ended_at)
+        refresh_portfolio_table(
+            preserve_selected_item_id=portfolio_preview_item_id,
+            status_text=(
+                f"<p>Portfolio run finished for <b>{items_count}</b> saved pair(s) on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
+                f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. Total capital: <b>{total_capital:.2f}</b>, "
+                f"allocation mode: <b>{final_mode_label}</b>. Active rows: <b>{len(active_ids)}</b>. "
+                f"Baseline equal slice: <b>{equal_allocation:.2f}</b>. Missing data rows: <b>{no_data_count}</b>. "
+                f"Rows excluded from combined equity: <b>{excluded_count}</b>.</p>"
+            ) if isinstance(started_at, datetime) and isinstance(ended_at, datetime) else "<p>Portfolio run finished.</p>",
+        )
+        sync_portfolio_equity_view()
+
     def on_run_portfolio() -> None:
-        nonlocal portfolio_run_rows_by_id, portfolio_preview_item_id
+        nonlocal portfolio_future, portfolio_poll_callback, portfolio_run_rows_by_id, portfolio_preview_item_id
+        if scanner_is_running():
+            portfolio_status_div.text = scanner_busy_message("running Portfolio")
+            return
+        if portfolio_future is not None and not portfolio_future.done():
+            portfolio_status_div.text = "<p>Portfolio run is already in progress.</p>"
+            return
+        if portfolio_future is not None and portfolio_future.done():
+            poll_portfolio_future()
+        blocking_label = running_heavy_job_label(exclude="portfolio")
+        if blocking_label is not None:
+            portfolio_status_div.text = f"<p>{blocking_label} is still running. Wait for it to finish before starting Portfolio.</p>"
+            return
         items = load_portfolio_items()
         if not items:
             portfolio_status_div.text = "<p>Portfolio is empty. Save at least one tester pair first.</p>"
@@ -4083,85 +5612,24 @@ if (!targets.length) {
             clear_portfolio_equity_outputs()
             refresh_portfolio_table(status_text="<p>No active portfolio rows. Double-click a row again to re-enable it.</p>")
             return
-        equal_allocation = total_capital / float(len(active_ids))
-        final_allocation_by_id = {
-            item.item_id: (equal_allocation if item.item_id in active_ids else 0.0)
-            for item in items
-        }
-        final_mode_label = "equal_weight"
-        no_data_count = 0
-        excluded_count = max(0, len(items) - len(active_ids))
-        display_allocation_by_id = portfolio_display_allocation_capitals(
-            items,
-            active_item_ids=active_ids,
-            active_allocation_capitals_by_id=final_allocation_by_id,
-            fallback_allocation_capital=equal_allocation,
+        clear_portfolio_analysis_outputs()
+        mark_portfolio_running()
+        portfolio_status_div.text = (
+            f"<p>Running Portfolio for <b>{len(items)}</b> saved pair(s) on "
+            f"<b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
+            f"Allocation mode: <b>{allocation_mode}</b>. Active rows: <b>{len(active_ids)}</b>.</p>"
         )
-
-        if allocation_mode == "diversified_risk":
-            provisional_curves, _rows, provisional_no_data_count, _ignored_excluded_count = run_portfolio_backtests(
-                items,
-                started_at=started_at,
-                ended_at=ended_at,
-                allocation_capitals_by_id=final_allocation_by_id,
-                included_item_ids=active_ids,
-            )
-            active_provisional_curves = [curve for curve in provisional_curves if curve.item_id in active_ids]
-            suggestion_rows = refresh_portfolio_analysis(active_provisional_curves, started_at=started_at, ended_at=ended_at)
-            if suggestion_rows:
-                final_allocation_by_id = {
-                    item.item_id: 0.0
-                    for item in items
-                }
-                for row in suggestion_rows:
-                    final_allocation_by_id[row.item_id] = total_capital * float(row.suggested_weight)
-                display_allocation_by_id = portfolio_display_allocation_capitals(
-                    items,
-                    active_item_ids=active_ids,
-                    active_allocation_capitals_by_id=final_allocation_by_id,
-                    fallback_allocation_capital=equal_allocation,
-                )
-                final_mode_label = "diversified_risk"
-            else:
-                final_mode_label = "equal_weight (fallback)"
-            no_data_count = provisional_no_data_count
-
-        curves, next_rows, run_no_data_count, _ignored_excluded_count = run_portfolio_backtests(
+        portfolio_future = portfolio_executor.submit(
+            run_portfolio_job,
             items,
             started_at=started_at,
             ended_at=ended_at,
-            allocation_capitals_by_id=display_allocation_by_id,
-            included_item_ids=active_ids,
+            total_capital=total_capital,
+            allocation_mode=allocation_mode,
+            active_ids=active_ids,
         )
-        no_data_count = max(no_data_count, run_no_data_count)
-        portfolio_run_rows_by_id = next_rows
-        portfolio_curves_by_id.clear()
-        portfolio_curve_sources_by_id.clear()
-        portfolio_curves_by_id.update({curve.item_id: curve for curve in curves})
-        if not any(curve.times and curve.equities for curve in curves if curve.item_id in active_ids):
-            portfolio_preview_item_id = None
-            clear_portfolio_equity_outputs()
-            refresh_portfolio_table(
-                status_text=(
-                    f"<p>Portfolio run found no aligned data for active rows on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
-                    f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
-                ),
-            )
-            return
-        if allocation_mode != "diversified_risk":
-            active_curves = [curve for curve in curves if curve.item_id in active_ids]
-            refresh_portfolio_analysis(active_curves, started_at=started_at, ended_at=ended_at)
-        refresh_portfolio_table(
-            preserve_selected_item_id=portfolio_preview_item_id,
-            status_text=(
-                f"<p>Portfolio run finished for <b>{len(items)}</b> saved pair(s) on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
-                f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. Total capital: <b>{total_capital:.2f}</b>, "
-                f"allocation mode: <b>{final_mode_label}</b>. Active rows: <b>{len(active_ids)}</b>. "
-                f"Baseline equal slice: <b>{equal_allocation:.2f}</b>. Missing data rows: <b>{no_data_count}</b>. "
-                f"Rows excluded from combined equity: <b>{excluded_count}</b>.</p>"
-            ),
-        )
-        sync_portfolio_equity_view()
+        if portfolio_poll_callback is None:
+            portfolio_poll_callback = doc.add_periodic_callback(poll_portfolio_future, 250)
         return
     def on_portfolio_period_change(_attr: str, _old: object, _new: object) -> None:
         clear_portfolio_analysis_outputs()
@@ -4336,12 +5804,15 @@ if (!targets.length) {
         )
 
     def restore_saved_meta_result(*, show_message: bool = False) -> None:
+        if not ui_bootstrap_complete and not show_message:
+            return
         if meta_future is not None and not meta_future.done():
             return
         pair = current_pair()
         if pair is None:
             clear_meta_outputs()
             return
+        load_saved_meta_selector_result, _run_meta_selector = _meta_selector_runtime()
         model_type = str(meta_model_select.value or "")
         current_objective_metric = str(meta_objective_select.value or wfa_objective_select.value or "score_log_trades")
         current_oos_started_at = read_meta_oos_started_at()
@@ -4493,15 +5964,19 @@ if (!targets.length) {
         history_rows = int(result.get("optimization_history_rows", 0) or 0)
         wfa_status_div.text = (
             f"<p>WFA live update: <b>{completed_folds}</b> / <b>{total}</b> folds ready. "
-            f"Current stitched net: <b>{stitched_net:.2f}</b>, trades: <b>{stitched_trades}</b>, saved optimization rows: <b>{history_rows}</b>.</p>"
+            f"Current stitched net: <b>{stitched_net:.2f}</b>, trades: <b>{stitched_trades}</b>, optimization rows: <b>{history_rows}</b>.</p>"
         )
 
     def render_wfa_progress() -> None:
         total = int(wfa_progress.get("total", 0) or 0)
         completed = int(wfa_progress.get("completed", 0) or 0)
         stage = str(wfa_progress.get("stage", "WFA"))
+        workers = int(wfa_progress.get("workers", 1) or 1)
         if total > 0:
-            wfa_status_div.text = f"<p>{stage}: <b>{completed}</b> / <b>{total}</b> folds completed using genetic optimization.</p>"
+            wfa_status_div.text = (
+                f"<p>{stage}: <b>{completed}</b> / <b>{total}</b> folds completed using genetic optimization on "
+                f"<b>{workers}</b> workers.</p>"
+            )
 
     def complete_wfa(result: dict[str, object], pair: PairSelection) -> None:
         table_data, equity_data = wfa_result_to_sources(result)
@@ -4510,15 +5985,35 @@ if (!targets.length) {
         sync_wfa_outputs_visibility()
         refresh_wfa_equity_ranges()
         failure_reason = str(result.get("failure_reason", "") or "")
+        cancelled = bool(result.get("cancelled", False))
         if failure_reason:
             meta_equity_source.data = {"time": [], "equity": []}
             refresh_meta_equity_ranges()
-            if failure_reason == "no_aligned_quotes":
+            if failure_reason == "cancelled":
+                completed_folds = int(result.get("fold_count", 0) or 0)
+                total = int(wfa_progress.get("total", 0) or 0)
+                if completed_folds > 0:
+                    wfa_status_div.text = (
+                        f"<p>WFA stopped for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> after "
+                        f"<b>{completed_folds}</b> / <b>{total}</b> completed folds.</p>"
+                    )
+                else:
+                    wfa_status_div.text = "<p>WFA stopped before any fold completed.</p>"
+            elif failure_reason == "no_aligned_quotes":
                 wfa_status_div.text = f"<p>No aligned parquet data for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on the selected WFA period.</p>"
             elif failure_reason == "no_wfa_windows":
                 wfa_status_div.text = "<p>No WFA windows could be built from the selected period, unit, lookback and test settings.</p>"
             else:
                 wfa_status_div.text = "<p>WFA produced no completed folds.</p>"
+            return
+        if cancelled:
+            completed_folds = int(result.get("fold_count", 0) or 0)
+            total = int(wfa_progress.get("total", 0) or 0)
+            wfa_status_div.text = (
+                f"<p>WFA stopped for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> after "
+                f"<b>{completed_folds}</b> / <b>{total}</b> completed folds. "
+                f"Partial stitched net: <b>{float(result.get('total_net_profit', 0.0) or 0.0):.2f}</b>.</p>"
+            )
             return
         wfa_status_div.text = (
             f"<p>WFA completed for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
@@ -4527,7 +6022,7 @@ if (!targets.length) {
             f"stitched net: <b>{float(result.get('total_net_profit', 0.0) or 0.0):.2f}</b>, "
             f"trades: <b>{int(result.get('total_trades', 0) or 0)}</b>, "
             f"commission: <b>{float(result.get('total_commission', 0.0) or 0.0):.2f}</b>, "
-            f"saved optimization rows: <b>{int(result.get('optimization_history_rows', 0) or 0)}</b>. "
+            f"optimization rows: <b>{int(result.get('optimization_history_rows', 0) or 0)}</b>. "
             f"Parquet: <b>{result.get('optimization_history_path') or 'n/a'}</b>.</p>"
         )
 
@@ -4541,10 +6036,13 @@ if (!targets.length) {
         test_units: int,
         unit_value: str,
         objective_metric: str,
+        parallel_workers: int,
+        cancel_check,
     ) -> dict[str, object]:
         wfa_progress["completed"] = 0
         wfa_progress["total"] = 0
         wfa_progress["stage"] = "Preparing WFA"
+        wfa_progress["workers"] = int(parallel_workers)
         return run_distance_genetic_wfa(
             broker=broker,
             pair=pair,
@@ -4559,7 +6057,9 @@ if (!targets.length) {
             test_units=test_units,
             step_units=test_units,
             unit=WfaWindowUnit(unit_value),
-            parallel_workers=optimizer_parallel_workers,
+            parallel_workers=parallel_workers,
+            history_top_k=wfa_history_top_k,
+            cancel_check=cancel_check,
             progress_callback=update_wfa_progress,
             partial_result_callback=update_wfa_partial_result,
         )
@@ -4575,7 +6075,7 @@ if (!targets.length) {
         wfa_poll_callback = None
 
     def poll_wfa_future() -> None:
-        nonlocal wfa_future
+        nonlocal wfa_future, wfa_cancel_event
         if wfa_future is None:
             return
         latest_version = int(wfa_live_state.get("version", 0) or 0)
@@ -4590,6 +6090,7 @@ if (!targets.length) {
             return
         future = wfa_future
         wfa_future = None
+        wfa_cancel_event = Event()
         clear_wfa_poll_callback()
         reset_wfa_button()
         try:
@@ -4600,9 +6101,17 @@ if (!targets.length) {
         complete_wfa(result, pair)
 
     def on_run_wfa() -> None:
-        nonlocal wfa_future, wfa_poll_callback
+        nonlocal wfa_future, wfa_poll_callback, wfa_cancel_event
+        if scanner_is_running():
+            wfa_status_div.text = scanner_busy_message("running WFA")
+            return
         if wfa_future is not None and not wfa_future.done():
-            render_wfa_progress()
+            if wfa_cancel_event.is_set():
+                wfa_status_div.text = "<p>Stop already requested. Waiting for running workers to terminate.</p>"
+                return
+            wfa_cancel_event.set()
+            mark_wfa_running(stopping=True)
+            wfa_status_div.text = "<p>Stop requested. Waiting for running workers to terminate.</p>"
             return
         if wfa_future is not None and wfa_future.done():
             poll_wfa_future()
@@ -4617,9 +6126,10 @@ if (!targets.length) {
             return
         lookback_units = int(_read_spinner_value(wfa_lookback_input, 8, cast=int))
         test_units = int(_read_spinner_value(wfa_test_input, 2, cast=int))
+        wfa_workers = int(_read_spinner_value(wfa_workers_input, optimizer_parallel_workers, cast=int))
         objective_metric = str(wfa_objective_select.value or "score_log_trades")
-        if lookback_units <= 0 or test_units <= 0:
-            wfa_status_div.text = "<p>Lookback and Test must be positive integers.</p>"
+        if lookback_units <= 0 or test_units <= 0 or wfa_workers <= 0:
+            wfa_status_div.text = "<p>Lookback, Test and Workers must be positive integers.</p>"
             return
         wfa_table_source.data = empty_wfa_table_data()
         wfa_table_source.selected.indices = []
@@ -4631,6 +6141,8 @@ if (!targets.length) {
         wfa_progress["completed"] = 0
         wfa_progress["total"] = 0
         wfa_progress["stage"] = "Starting WFA"
+        wfa_progress["workers"] = wfa_workers
+        wfa_cancel_event = Event()
         wfa_live_state["version"] = 0
         wfa_live_state["applied_version"] = 0
         wfa_live_state["result"] = None
@@ -4638,7 +6150,7 @@ if (!targets.length) {
         wfa_status_div.text = (
             f"<p>Running WFA for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
             f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b> with lookback <b>{lookback_units}</b> {wfa_unit_select.value} and test <b>{test_units}</b> {wfa_unit_select.value}."
-            f" Objective: <b>{objective_metric}</b>.</p>"
+            f" Objective: <b>{objective_metric}</b>. Workers: <b>{wfa_workers}</b>.</p>"
         )
         wfa_future = wfa_executor.submit(
             lambda: (
@@ -4652,6 +6164,8 @@ if (!targets.length) {
                     test_units,
                     wfa_unit_select.value,
                     objective_metric,
+                    wfa_workers,
+                    wfa_cancel_event.is_set,
                 ),
                 pair,
             )
@@ -4764,6 +6278,7 @@ if (!targets.length) {
         oos_started_at: datetime | None,
         model_config: dict[str, float | int],
     ) -> dict[str, object]:
+        _load_saved_meta_selector_result, run_meta_selector = _meta_selector_runtime()
         return run_meta_selector(
             broker=broker,
             pair=pair,
@@ -4805,6 +6320,9 @@ if (!targets.length) {
 
     def on_run_meta() -> None:
         nonlocal meta_future, meta_poll_callback
+        if scanner_is_running():
+            meta_status_div.text = scanner_busy_message("running Meta Selector")
+            return
         if meta_future is not None and not meta_future.done():
             return
         if meta_future is not None and meta_future.done():
@@ -4832,6 +6350,10 @@ if (!targets.length) {
             meta_poll_callback = doc.add_periodic_callback(poll_meta_future, 250)
 
     def on_meta_selection(_attr: str, _old: object, _new: object) -> None:
+        if scanner_is_running():
+            meta_table_source.selected.indices = []
+            meta_status_div.text = scanner_busy_message("replaying selected folds in tester")
+            return
         # UX contract:
         # Clicking a Selected OOS Folds row copies only that fold's strategy
         # parameters into the tester and replays charts on the current tester
@@ -4872,6 +6394,10 @@ if (!targets.length) {
             )
 
     def on_meta_ranking_selection(_attr: str, _old: object, _new: object) -> None:
+        if scanner_is_running():
+            meta_ranking_source.selected.indices = []
+            meta_status_div.text = scanner_busy_message("replaying robustness rows in tester")
+            return
         # UX contract:
         # Clicking a Meta Robustness Grid row replays that ranked parameter set
         # on the current tester period only. It must not overwrite tester dates
@@ -4970,8 +6496,15 @@ if (!targets.length) {
                 f"<p>The best row is selected. Single-click copies parameters into tester and renders it on the current tester period.</p>"
             )
 
-    def apply_backtest_result(*, period_override: tuple[datetime, datetime] | None = None) -> bool:
-        request, error_message = current_backtest_request(period_override=period_override)
+    def apply_backtest_result(
+        *,
+        period_override: tuple[datetime, datetime] | None = None,
+        pair_override: PairSelection | None = None,
+    ) -> bool:
+        request, error_message = current_backtest_request(
+            period_override=period_override,
+            pair_override=pair_override,
+        )
         if request is None:
             return clear_backtest_outputs(error_message or "<p>Test request is invalid.</p>")
         return apply_backtest_payload(run_tester_job(request))
@@ -4985,6 +6518,8 @@ if (!targets.length) {
         suppress_symbol_change_refresh = max(0, suppress_symbol_change_refresh - 1)
 
     def maybe_refresh_price_plots_for_symbol_change() -> None:
+        if scanner_is_running():
+            return
         if suppress_symbol_change_refresh > 0:
             return
         if not (price_1_body.visible or price_2_body.visible):
@@ -5014,11 +6549,12 @@ if (!targets.length) {
 
     def refresh_instruments() -> None:
         sync_catalog_group_select_options()
+        sync_scanner_cointegration_run_options()
         selected_group = group_select.value
         options = instrument_options_for_group(selected_group)
         begin_symbol_change_refresh_suppression()
         try:
-            symbol_1_select.options = options
+            symbol_1_select.options = _clone_select_options(_symbol_select_options(options))
             symbol_1_select.value = _preferred_symbol_1(options, symbol_1_select.value)
             sync_symbol_2_filter(base_options=options, show_message=leg_2_filter_select.value != 'all_symbols')
         finally:
@@ -5035,11 +6571,12 @@ if (!targets.length) {
 
     def on_symbol_1_change(_attr: str, _old: object, _new: object) -> None:
         sync_price_plot_labels()
-        begin_symbol_change_refresh_suppression()
-        try:
-            sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
-        finally:
-            end_symbol_change_refresh_suppression()
+        if suppress_symbol_filter_sync <= 0:
+            begin_symbol_change_refresh_suppression()
+            try:
+                sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
+            finally:
+                end_symbol_change_refresh_suppression()
         restore_saved_wfa_result(show_message=False)
         restore_saved_meta_result(show_message=False)
         on_optimization_config_change(_attr, _old, _new)
@@ -5063,14 +6600,19 @@ if (!targets.length) {
             sync_symbol_2_filter(show_message=True)
 
     def on_timeframe_change(_attr: str, _old: object, _new: object) -> None:
+        sync_scanner_cointegration_run_options()
         sync_symbol_2_filter(show_message=leg_2_filter_select.value != 'all_symbols')
         restore_saved_scan_table(show_message=True)
+        restore_saved_scanner_table(show_message=False)
         restore_saved_wfa_result(show_message=False)
         restore_saved_meta_result(show_message=False)
         on_optimization_config_change(_attr, _old, _new)
 
     def on_scan_universe_change(_attr: str, _old: object, _new: object) -> None:
         restore_saved_scan_table(show_message=True)
+
+    def on_scanner_universe_change(_attr: str, _old: object, _new: object) -> None:
+        restore_saved_scanner_table(show_message=True)
 
     def on_scan_kind_change(_attr: str, _old: object, _new: object) -> None:
         restore_saved_scan_table(show_message=True)
@@ -5119,6 +6661,8 @@ if (!targets.length) {
     def on_section_visibility_change(_attr: str, _old: object, _new: object) -> None:
         rebalance_layout()
         refresh_plot_ranges()
+        if meta_body.visible and ui_bootstrap_complete:
+            restore_saved_meta_result(show_message=False)
 
     def on_range_change(_attr: str, _old: object, _new: object) -> None:
         if suppress_shared_range_change:
@@ -5168,6 +6712,12 @@ if (!targets.length) {
         render_optimization_trial_in_tester(index, selection_label="Trial")
 
     def on_scan_selection(_attr: str, _old: object, _new: object) -> None:
+        if suppress_scan_selection:
+            return
+        if scanner_is_running():
+            state.scan_source.selected.indices = []
+            scan_status_div.text = scanner_busy_message("replaying cointegration scan rows in tester")
+            return
         indices = state.scan_source.selected.indices
         if not indices:
             return
@@ -5179,17 +6729,10 @@ if (!targets.length) {
         data = state.scan_source.data
         symbol_1 = data["symbol_1"][index]
         symbol_2 = data["symbol_2"][index]
-        options = _merge_symbol_options(list(symbol_1_select.options), symbol_1, symbol_2)
-        begin_symbol_change_refresh_suppression()
-        try:
-            symbol_1_select.options = options
-            symbol_2_select.options = options
-            symbol_1_select.value = symbol_1
-            symbol_2_select.value = symbol_2
-        finally:
-            end_symbol_change_refresh_suppression()
+        selected_pair = PairSelection(symbol_1=str(symbol_1), symbol_2=str(symbol_2))
+        copy_pair_to_selectors(symbol_1, symbol_2)
         set_tester_context("scan_row", context_started_at=tester_period[0], context_ended_at=tester_period[1])
-        ran = apply_backtest_result(period_override=tester_period)
+        ran = apply_backtest_result(period_override=tester_period, pair_override=selected_pair)
         if ran:
             scan_status_div.text = (
                 f"<p>Pair copied from cointegration scan and tested immediately on tester period "
@@ -5199,7 +6742,119 @@ if (!targets.length) {
         else:
             scan_status_div.text = f"<p>Pair copied from cointegration scan: <b>{symbol_1}</b> / <b>{symbol_2}</b>. Test did not run because aligned data is missing.</p>"
 
+    def on_scanner_selection(_attr: str, _old: object, _new: object) -> None:
+        nonlocal suppress_optimization_config_change
+        if suppress_scanner_selection:
+            return
+        indices = scanner_table_source.selected.indices
+        if not indices:
+            return
+        train_period = active_scanner_train_period()
+        if train_period is None:
+            scanner_status_div.text = "<p>Scanner selection needs a valid train period before the Optimization Period cutoff.</p>"
+            return
+        tester_period = (
+            _coerce_datetime(period_slider.value[0]),
+            _coerce_datetime(period_slider.value[1]),
+        )
+        index = indices[0]
+        data = scanner_table_source.data
+        symbol_1 = str(data["symbol_1"][index])
+        symbol_2 = str(data["symbol_2"][index])
+        selected_pair = PairSelection(symbol_1=symbol_1, symbol_2=symbol_2)
+        row_timeframe = str((data.get("timeframe") or [timeframe_select.value])[index] or timeframe_select.value)
+        row_initial_capital = float((data.get("initial_capital") or [capital_input.value])[index] or capital_input.value)
+        row_leverage = float((data.get("leverage") or [leverage_input.value])[index] or leverage_input.value)
+        row_margin_budget = float((data.get("margin_budget_per_leg") or [margin_budget_input.value])[index] or margin_budget_input.value)
+        row_slippage = float((data.get("slippage_points") or [slippage_input.value])[index] or slippage_input.value)
+        row_fee_mode = str((data.get("fee_mode") or [bybit_fee_mode_select.value])[index] or bybit_fee_mode_select.value)
+
+        doc.hold("combine")
+        suppress_optimization_config_change = True
+        try:
+            with file_state_controller.suspend():
+                if row_timeframe in TIMEFRAME_OPTIONS:
+                    timeframe_select.value = row_timeframe
+                if row_fee_mode in BYBIT_FEE_MODE_OPTIONS:
+                    bybit_fee_mode_select.value = row_fee_mode
+                capital_input.value = row_initial_capital
+                leverage_input.value = row_leverage
+                margin_budget_input.value = row_margin_budget
+                slippage_input.value = row_slippage
+                copy_pair_to_selectors(symbol_1, symbol_2)
+                lookback_input.value = int(data["lookback_bars"][index])
+                entry_input.value = float(data["entry_z"][index])
+                exit_input.value = float(data["exit_z"][index])
+                raw_stop = data["stop_z"][index]
+                if raw_stop in (None, ""):
+                    stop_mode_select.value = "disabled"
+                else:
+                    stop_mode_select.value = "enabled"
+                    stop_input.value = float(raw_stop)
+                bollinger_input.value = float(data["bollinger_k"][index])
+                set_tester_context(
+                    "scanner_row",
+                    oos_started_at=active_scanner_oos_started_at(),
+                    context_started_at=train_period[0],
+                    context_ended_at=active_scanner_oos_started_at(),
+                )
+        finally:
+            suppress_optimization_config_change = False
+            doc.unhold()
+        file_state_controller.persist()
+
+        request, error_message = current_backtest_request(
+            period_override=tester_period,
+            pair_override=selected_pair,
+        )
+        if request is None:
+            clear_backtest_outputs(error_message or "<p>Test request is invalid.</p>")
+            scanner_status_div.text = (
+                f"<p>Scanner row copied into tester: <b>{symbol_1}</b> / <b>{symbol_2}</b>. "
+                "Test did not start because the tester request is invalid.</p>"
+            )
+            return
+
+        pair = request["pair"]
+        timeframe = request["timeframe"]
+        started_at = request["started_at"]
+        ended_at = request["ended_at"]
+        assert isinstance(pair, PairSelection)
+        assert isinstance(timeframe, Timeframe)
+        assert isinstance(started_at, datetime)
+        assert isinstance(ended_at, datetime)
+
+        submitted, busy_message = submit_tester_request(
+            request,
+            pending_message=(
+                f"<p>Running Distance test for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
+                f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            ),
+        )
+        if not submitted:
+            scanner_status_div.text = busy_message or (
+                f"<p>Scanner row copied into tester: <b>{symbol_1}</b> / <b>{symbol_2}</b>. "
+                "Tester is already running another request.</p>"
+            )
+            return
+
+        if scanner_is_running():
+            scanner_status_div.text = (
+                f"<p>Scanner row <b>{int(data['global_rank'][index])}</b> copied into tester and queued for execution on tester period "
+                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b> while Scanner continues in background: "
+                f"<b>{symbol_1}</b> / <b>{symbol_2}</b>.</p>"
+            )
+        else:
+            scanner_status_div.text = (
+                f"<p>Scanner row <b>{int(data['global_rank'][index])}</b> copied into tester and queued for execution on tester period "
+                f"<b>{tester_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{tester_period[1]:%Y-%m-%d %H:%M} UTC</b>: "
+                f"<b>{symbol_1}</b> / <b>{symbol_2}</b>.</p>"
+            )
+
     def on_run_test() -> None:
+        if scanner_is_running():
+            summary_div.text = scanner_busy_message("running a Distance test")
+            return
         tester_started_at = _coerce_datetime(period_slider.value[0])
         tester_ended_at = _coerce_datetime(period_slider.value[1])
         set_tester_context("tester_manual", context_started_at=tester_started_at, context_ended_at=tester_ended_at)
@@ -5310,6 +6965,9 @@ if (!targets.length) {
 
     def on_run_optimization() -> None:
         nonlocal optimization_future, optimization_poll_callback, optimization_request_context
+        if scanner_is_running():
+            optimization_status_div.text = scanner_busy_message("running Optimization")
+            return
 
         if optimization_future is not None and not optimization_future.done():
             if optimization_cancel_event.is_set():
@@ -5411,15 +7069,51 @@ if (!targets.length) {
         ended_at: datetime,
         universe_mode: ScanUniverseMode,
         normalized_group: str | None,
+        allowed_pair_keys: Sequence[str] | None,
         unit_root_test_value: str,
         det_order: int,
         k_ar_diff: int,
         significance_level: float,
+        created_at: datetime,
+        resume_result: JohansenUniverseScanResult | None,
+        cancel_check,
     ) -> JohansenUniverseScanResult:
         scan_progress["completed"] = 0
         scan_progress["total"] = 0
         scan_progress["stage"] = "Preparing Johansen scan"
-        return scan_universe_johansen(
+        scan_progress["workers"] = scan_parallel_workers
+        scan_progress["started_monotonic"] = monotonic()
+        last_partial_persist_at = 0.0
+
+        def persist_partial_scan_snapshot(result: JohansenUniverseScanResult, *, force: bool = False) -> None:
+            nonlocal last_partial_persist_at
+            now = monotonic()
+            if not force and (now - last_partial_persist_at) < 2.0:
+                return
+            persist_johansen_scan_result(
+                broker=broker,
+                timeframe=timeframe,
+                started_at=started_at,
+                ended_at=ended_at,
+                universe_mode=universe_mode,
+                normalized_group=normalized_group,
+                symbols=None,
+                result=result,
+                created_at=created_at,
+                unit_root_test_value=unit_root_test_value,
+                det_order=det_order,
+                k_ar_diff=k_ar_diff,
+                significance_level=significance_level,
+                complete=False,
+            )
+            last_partial_persist_at = now
+
+        def handle_partial_scan_result(result: JohansenUniverseScanResult) -> None:
+            update_scan_partial_result(result)
+            if result.rows:
+                persist_partial_scan_snapshot(result)
+
+        result = scan_universe_johansen(
             broker=broker,
             timeframe=timeframe,
             started_at=started_at,
@@ -5434,7 +7128,139 @@ if (!targets.length) {
             ),
             progress_callback=update_scan_progress,
             parallel_workers=scan_parallel_workers,
+            partial_result_callback=handle_partial_scan_result,
+            cancel_check=cancel_check,
+            resume_result=resume_result,
+            allowed_pair_keys=allowed_pair_keys,
         )
+        update_scan_partial_result(result)
+        if result.rows:
+            persist_partial_scan_snapshot(result, force=True)
+        return result
+
+    def run_scanner_job(
+        timeframe: Timeframe,
+        started_at: datetime,
+        ended_at: datetime,
+        oos_started_at: datetime,
+        defaults: StrategyDefaults,
+        search_space: dict[str, object],
+        fee_mode: str,
+        search_signature: str,
+        scope_jobs: Sequence[dict[str, object]],
+        cancel_check,
+    ) -> OptimizerGridScanResult:
+        scope_totals = {
+            str(job["scope_label"]): int(job["pair_count"])
+            for job in scope_jobs
+        }
+        scope_completed = {
+            str(job["scope_label"]): (
+                int(job["cached_pairs"])
+                if isinstance(job.get("resume_result"), OptimizerGridScanResult)
+                else 0
+            )
+            for job in scope_jobs
+        }
+        scope_results: dict[str, OptimizerGridScanResult] = {
+            str(job["scope_label"]): job["cached_result"]
+            for job in scope_jobs
+            if isinstance(job.get("cached_result"), OptimizerGridScanResult)
+        }
+        total_pairs = sum(scope_totals.values())
+        scanner_progress["completed"] = sum(scope_completed.values())
+        scanner_progress["total"] = total_pairs
+        scanner_progress["stage"] = "Preparing scanner"
+        scanner_progress["workers"] = scanner_parallel_workers
+        train_period = (started_at, ended_at)
+
+        def combined_result() -> OptimizerGridScanResult:
+            return combine_optimizer_grid_scan_results(list(scope_results.values()))
+
+        final_result = combined_result() if scope_results else combine_optimizer_grid_scan_results([])
+        if scope_results:
+            update_scanner_partial_result(final_result)
+
+        for job in scope_jobs:
+            if cancel_check():
+                break
+            universe_mode = job["universe_mode"] if isinstance(job.get("universe_mode"), ScanUniverseMode) else ScanUniverseMode.GROUP
+            normalized_group = str(job["normalized_group"])
+            if universe_mode == ScanUniverseMode.ALL:
+                normalized_group = None
+            scope_label = str(job["scope_label"])
+            cached_result = job["cached_result"] if isinstance(job.get("cached_result"), OptimizerGridScanResult) else None
+            resume_result = job["resume_result"] if isinstance(job.get("resume_result"), OptimizerGridScanResult) else None
+
+            def scoped_progress(completed: int, total: int, stage: str, *, current_scope: str = scope_label) -> None:
+                scope_completed[current_scope] = int(completed)
+                update_scanner_progress(
+                    sum(scope_completed.values()),
+                    total_pairs,
+                    f"{current_scope} · {stage}",
+                )
+
+            def handle_partial_result(result: OptimizerGridScanResult, *, current_scope: str = scope_label) -> None:
+                scope_results[current_scope] = result
+                scope_completed[current_scope] = int(result.summary.total_pairs_evaluated or 0)
+                aggregate_result = combined_result()
+                update_scanner_partial_result(aggregate_result)
+                persist_scanner_result_snapshot(
+                    scope_label=current_scope,
+                    search_signature=search_signature,
+                    timeframe=timeframe,
+                    train_period=train_period,
+                    oos_started_at=oos_started_at,
+                    defaults=defaults,
+                    search_space=search_space,
+                    fee_mode=fee_mode,
+                    result=result,
+                )
+
+            result = scan_universe_optimizer_grid(
+                broker=broker,
+                timeframe=timeframe,
+                started_at=started_at,
+                ended_at=ended_at,
+                universe_mode=universe_mode,
+                normalized_group=normalized_group,
+                defaults=defaults,
+                search_space=search_space,
+                fee_mode=fee_mode,
+                min_r_squared=0.9,
+                top_n_per_pair=10,
+                progress_callback=scoped_progress,
+                partial_result_callback=handle_partial_result,
+                cancel_check=cancel_check,
+                parallel_workers=scanner_parallel_workers,
+                universe_scope=scope_label,
+                resume_result=resume_result,
+                allowed_pair_keys=list(job.get("allowed_pair_keys") or []),
+            )
+            preserve_cached_result = (
+                result.cancelled
+                and int(result.summary.total_pairs_evaluated or 0) <= 0
+                and cached_result is not None
+            )
+            scope_results[scope_label] = cached_result if preserve_cached_result else result
+            if not preserve_cached_result:
+                scope_completed[scope_label] = int(result.summary.total_pairs_evaluated or 0)
+                persist_scanner_result_snapshot(
+                    scope_label=scope_label,
+                    search_signature=search_signature,
+                    timeframe=timeframe,
+                    train_period=train_period,
+                    oos_started_at=oos_started_at,
+                    defaults=defaults,
+                    search_space=search_space,
+                    fee_mode=fee_mode,
+                    result=result,
+                )
+            final_result = combined_result()
+            update_scanner_partial_result(final_result)
+            if result.cancelled:
+                break
+        return final_result
 
     def clear_scan_poll_callback() -> None:
         nonlocal scan_poll_callback
@@ -5446,25 +7272,46 @@ if (!targets.length) {
             pass
         scan_poll_callback = None
 
+    def clear_scanner_poll_callback() -> None:
+        nonlocal scanner_poll_callback
+        if scanner_poll_callback is None:
+            return
+        try:
+            doc.remove_periodic_callback(scanner_poll_callback)
+        except ValueError:
+            pass
+        scanner_poll_callback = None
+
     def poll_scan_future() -> None:
-        nonlocal scan_future, scan_request_context
+        nonlocal scan_future, scan_request_context, scan_cancel_event
         if scan_future is None:
             return
+        latest_version = int(scan_live_state.get("version", 0) or 0)
+        applied_version = int(scan_live_state.get("applied_version", 0) or 0)
+        if latest_version > applied_version:
+            partial_result = scan_live_state.get("result")
+            if isinstance(partial_result, JohansenUniverseScanResult):
+                apply_scan_snapshot(partial_result, final=False)
+            scan_live_state["applied_version"] = latest_version
         if not scan_future.done():
             render_scan_progress()
             return
 
         future = scan_future
         scan_future = None
+        scan_cancel_event = Event()
+        scan_progress["started_monotonic"] = None
         clear_scan_poll_callback()
         reset_scan_button()
 
         try:
             scan_result = future.result()
         except Exception as exc:  # pragma: no cover - runtime UI path
+            scan_request_context = None
             scan_status_div.text = f"<p>Johansen scan failed: {exc}</p>"
             return
 
+        apply_scan_snapshot(scan_result, final=True)
         storage_summary = ''
         if scan_request_context is not None:
             saved_paths = persist_johansen_scan_result(
@@ -5476,25 +7323,126 @@ if (!targets.length) {
                 normalized_group=scan_request_context['normalized_group'],
                 symbols=None,
                 result=scan_result,
+                created_at=scan_request_context['created_at'],
+                unit_root_test_value=scan_request_context['unit_root_test_value'],
+                det_order=scan_request_context['det_order'],
+                k_ar_diff=scan_request_context['k_ar_diff'],
+                significance_level=scan_request_context['significance_level'],
+                complete=not scan_result.cancelled,
             )
             storage_summary = f" Saved passed pairs to <b>{saved_paths['latest_passed_pairs']}</b>."
-        state.scan_source.data = scan_results_to_source(scan_result, passed_only=True)
-        state.scan_source.selected.indices = []
         summary = scan_result.summary
-        scan_status_div.text = (
-            f"<p>Scanned {summary.total_symbols_requested} symbols. Loaded: {summary.loaded_symbols}, "
-            f"I(1): {summary.prefiltered_i1_symbols}, Pairs: {summary.total_pairs_evaluated}, "
-            f"Passed: {summary.threshold_passed_pairs}.{storage_summary}</p>"
-        )
+        total_pairs = int(scan_progress.get("total", 0) or summary.total_pairs_evaluated)
+        if scan_result.cancelled:
+            scan_status_div.text = (
+                f"<p>Johansen scan stopped. Loaded: <b>{summary.loaded_symbols}</b>, I(1): <b>{summary.prefiltered_i1_symbols}</b>, "
+                f"processed pairs: <b>{summary.total_pairs_evaluated}</b> / <b>{total_pairs}</b>, "
+                f"passed: <b>{summary.threshold_passed_pairs}</b>. Partial snapshot is saved and the next run will resume this exact "
+                f"timeframe/period/scope/config.{storage_summary}</p>"
+            )
+        else:
+            scan_status_div.text = (
+                f"<p>Scanned {summary.total_symbols_requested} symbols. Loaded: {summary.loaded_symbols}, "
+                f"I(1): {summary.prefiltered_i1_symbols}, Pairs: {summary.total_pairs_evaluated}, "
+                f"Passed: {summary.threshold_passed_pairs}.{storage_summary}</p>"
+            )
+        sync_scanner_cointegration_run_options()
         if leg_2_filter_select.value == 'cointegrated_only' and leg_2_cointegration_kind_select.value == scan_kind_select.value:
             sync_symbol_2_filter(show_message=False)
         scan_request_context = None
 
+    def poll_scanner_future() -> None:
+        nonlocal scanner_future, scanner_request_context, scanner_cancel_event
+        if scanner_future is None:
+            return
+        latest_version = int(scanner_live_state.get("version", 0) or 0)
+        applied_version = int(scanner_live_state.get("applied_version", 0) or 0)
+        if latest_version > applied_version:
+            partial_result = scanner_live_state.get("result")
+            if isinstance(partial_result, OptimizerGridScanResult):
+                apply_scanner_snapshot(partial_result, final=False)
+            scanner_live_state["applied_version"] = latest_version
+        if not scanner_future.done():
+            render_scanner_progress()
+            return
+
+        future = scanner_future
+        scanner_future = None
+        scanner_cancel_event = Event()
+        scanner_progress["started_monotonic"] = None
+        clear_scanner_poll_callback()
+        reset_scanner_button()
+
+        try:
+            result = future.result()
+        except Exception as exc:  # pragma: no cover - runtime UI path
+            scanner_request_context = None
+            scanner_status_div.text = f"<p>Scanner failed: {exc}</p>"
+            return
+
+        apply_scanner_snapshot(result, final=True)
+        summary = result.summary
+        request_context = dict(scanner_request_context or {})
+        initial_display_pairs = int(request_context.get("initial_display_pairs", 0) or 0)
+        train_started_at = request_context.get("train_started_at")
+        train_ended_at = request_context.get("train_ended_at")
+        oos_started_at = request_context.get("oos_started_at")
+        train_period = (
+            (train_started_at, train_ended_at)
+            if isinstance(train_started_at, datetime) and isinstance(train_ended_at, datetime)
+            else current_scanner_train_period()
+        )
+        if not isinstance(oos_started_at, datetime):
+            oos_started_at = current_optimizer_oos_started_at()
+        train_label = (
+            f"<b>{train_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{train_period[1]:%Y-%m-%d %H:%M} UTC</b>"
+            if train_period is not None
+            else "n/a"
+        )
+        scanner_request_context = None
+        if result.cancelled:
+            preserved_cached_note = ""
+            if initial_display_pairs > 0 and int(summary.total_pairs_evaluated or 0) == initial_display_pairs:
+                preserved_cached_note = " Previous cached results were kept because no new pair finished before stop."
+            scanner_status_div.text = (
+                f"<p>Scanner stopped. Processed pairs: <b>{summary.total_pairs_evaluated}</b> / <b>{summary.total_pair_candidates}</b>, "
+                f"rows kept: <b>{summary.total_rows}</b>, trials: <b>{summary.total_trials_evaluated}</b>. "
+                f"Partial results stay cached and can be resumed later.{preserved_cached_note}</p>"
+            )
+            return
+        if result.failure_reason == "no_loaded_quotes":
+            scanner_status_div.text = "<p>Scanner found no loaded quotes on the selected train history.</p>"
+            return
+        if result.failure_reason == "no_pair_candidates":
+            scanner_status_div.text = "<p>Scanner needs at least two symbols with available quotes.</p>"
+            return
+        if result.failure_reason == "no_rows_passed_filters":
+            scanner_status_div.text = (
+                f"<p>Scanner evaluated <b>{summary.total_pairs_evaluated}</b> pairs and <b>{summary.total_trials_evaluated}</b> trials, "
+                f"but no rows passed <b>Net &gt; 0</b> and <b>Trades &gt; 0</b>. Train: {train_label}. OOS starts at "
+                f"<b>{oos_started_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+            )
+            return
+        scanner_status_div.text = (
+            f"<p>Scanner finished. Symbols loaded: <b>{summary.loaded_symbols}</b>, pairs: <b>{summary.total_pairs_evaluated}</b>, "
+            f"pairs with hits: <b>{summary.pairs_with_hits}</b>, rows kept: <b>{summary.total_rows}</b>, "
+            f"trials: <b>{summary.total_trials_evaluated}</b>. Train: {train_label}. OOS starts at "
+            f"<b>{oos_started_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
+        )
+
     def on_run_scan() -> None:
-        nonlocal scan_future, scan_poll_callback, scan_request_context
+        nonlocal scan_future, scan_poll_callback, scan_request_context, scan_cancel_event
+        if scanner_is_running():
+            scan_status_div.text = scanner_busy_message("running Johansen scan")
+            return
 
         if scan_future is not None and not scan_future.done():
-            render_scan_progress()
+            if not scan_cancel_event.is_set():
+                scan_cancel_event.set()
+                mark_scan_running(stopping=True)
+                scan_status_div.text = "<p>Stop requested for Johansen scan. Waiting for running workers to terminate.</p>"
+            else:
+                render_scan_progress()
             return
 
         if scan_future is not None and scan_future.done():
@@ -5511,22 +7459,75 @@ if (!targets.length) {
                 scan_status_div.text += ' <p>Running a new scan is currently wired only for <b>johansen</b>.</p>'
             return
 
-        started_at = _coerce_datetime(scan_period_slider.value[0])
-        ended_at = _coerce_datetime(scan_period_slider.value[1])
+        blocking_label = running_heavy_job_label(exclude="cointegration")
+        if blocking_label is not None:
+            scan_status_div.text = f"<p>{blocking_label} is still running. Wait for it to finish before starting Johansen scan.</p>"
+            return
+
+        started_at, ended_at = current_scan_period()
         universe_mode, normalized_group = current_scan_selection_scope()
+        johansen_config = current_johansen_scan_config()
+        resume_snapshot = load_latest_saved_scan_result(
+            broker=broker,
+            scan_kind="johansen",
+            timeframe=Timeframe(timeframe_select.value),
+            universe_mode=universe_mode,
+            normalized_group=normalized_group,
+            allow_all_fallback=False,
+            started_at=started_at,
+            ended_at=ended_at,
+            unit_root_test_value=str(johansen_config["unit_root_test_value"]),
+            det_order=int(johansen_config["det_order"]),
+            k_ar_diff=int(johansen_config["k_ar_diff"]),
+            significance_level=float(johansen_config["significance_level"]),
+            require_complete=False,
+        )
+        resume_result = (
+            snapshot_to_johansen_result(resume_snapshot)
+            if resume_snapshot is not None and not resume_snapshot.complete
+            else None
+        )
+        if not scan_snapshot_matches_exact_group_pairs(resume_snapshot, normalized_group):
+            resume_snapshot = None
+            resume_result = None
+        allowed_pair_keys = exact_group_allowed_pair_keys(normalized_group, resolve_scan_symbols(
+            broker=broker,
+            universe_mode=universe_mode,
+            normalized_group=normalized_group,
+        ))
 
         scan_progress["completed"] = 0
         scan_progress["total"] = 0
         scan_progress["stage"] = "Preparing Johansen scan"
+        scan_progress["workers"] = scan_parallel_workers
+        scan_progress["started_monotonic"] = monotonic()
+        scan_live_state["version"] = 0
+        scan_live_state["applied_version"] = 0
+        scan_live_state["result"] = resume_result
+        scan_cancel_event = Event()
+        run_created_at = datetime.now(UTC)
         scan_request_context = {
             'timeframe': Timeframe(timeframe_select.value),
             'started_at': started_at,
             'ended_at': ended_at,
             'universe_mode': universe_mode,
             'normalized_group': normalized_group,
+            'allowed_pair_keys': list(allowed_pair_keys or []),
+            'unit_root_test_value': str(johansen_config["unit_root_test_value"]),
+            'det_order': int(johansen_config["det_order"]),
+            'k_ar_diff': int(johansen_config["k_ar_diff"]),
+            'significance_level': float(johansen_config["significance_level"]),
+            'created_at': run_created_at,
         }
         mark_scan_running()
-        scan_status_div.text = f"<p>Starting Johansen scan on <b>{scan_parallel_workers}</b> workers...</p>"
+        if resume_result is not None:
+            apply_scan_snapshot(resume_result, final=False)
+            scan_status_div.text = (
+                f"<p>Resuming saved partial Johansen scan with <b>{resume_result.summary.total_pairs_evaluated}</b> processed pairs "
+                f"on <b>{scan_parallel_workers}</b> workers...</p>"
+            )
+        else:
+            scan_status_div.text = f"<p>Starting Johansen scan on <b>{scan_parallel_workers}</b> workers...</p>"
         scan_future = scan_executor.submit(
             run_scan_job,
             Timeframe(timeframe_select.value),
@@ -5534,13 +7535,142 @@ if (!targets.length) {
             ended_at,
             universe_mode,
             normalized_group,
-            scan_unit_root_select.value,
-            int(_read_spinner_value(scan_det_order_input, 0, cast=int)),
-            int(_read_spinner_value(scan_k_ar_diff_input, 1, cast=int)),
-            float(scan_significance_select.value),
+            list(allowed_pair_keys or []),
+            str(johansen_config["unit_root_test_value"]),
+            int(johansen_config["det_order"]),
+            int(johansen_config["k_ar_diff"]),
+            float(johansen_config["significance_level"]),
+            run_created_at,
+            resume_result,
+            scan_cancel_event.is_set,
         )
         if scan_poll_callback is None:
             scan_poll_callback = doc.add_periodic_callback(poll_scan_future, 250)
+
+    def on_run_scanner() -> None:
+        nonlocal scanner_future, scanner_poll_callback, scanner_request_context
+
+        if scanner_future is not None and not scanner_future.done():
+            if not scanner_cancel_event.is_set():
+                scanner_cancel_event.set()
+                mark_scanner_running(stopping=True)
+                scanner_status_div.text = "<p>Stop requested for Scanner. Waiting for running workers to terminate.</p>"
+            else:
+                scanner_status_div.text = "<p>Scanner stop already requested. Waiting for running workers to terminate.</p>"
+            return
+
+        if scanner_future is not None and scanner_future.done():
+            poll_scanner_future()
+
+        blocking_label = running_heavy_job_label(exclude="scanner")
+        if blocking_label is not None:
+            scanner_status_div.text = f"<p>{blocking_label} is still running. Wait for it to finish before starting Scanner.</p>"
+            return
+
+        train_period = current_scanner_train_period()
+        if train_period is None:
+            scanner_status_div.text = (
+                "<p>Scanner train history is empty. Move the <b>Optimization Period</b> end later so OOS starts after at least one bar of train data.</p>"
+            )
+            return
+
+        search_space = scanner_search_space()
+        trials_per_pair = count_distance_parameter_grid(search_space)
+        if trials_per_pair <= 0:
+            scanner_status_div.text = (
+                "<p>Scanner grid produced <b>0</b> valid parameter combinations. "
+                "Adjust the current optimizer bounds or Scanner Grid Size.</p>"
+            )
+            return
+        search_signature = current_scanner_request_signature(train_period=train_period, search_space=search_space)
+        if not search_signature:
+            scanner_status_div.text = "<p>Scanner request signature could not be built for the current configuration.</p>"
+            return
+        view_scope = current_scanner_view_scope_label()
+        scope_jobs = build_selected_scanner_scope_jobs(search_signature=search_signature)
+        if view_scope is None and not scope_jobs:
+            scanner_status_div.text = (
+                "<p><b>Universe = all</b> has no concrete catalog groups available right now. "
+                "Refresh instruments first, then run Scanner again.</p>"
+            )
+            return
+        scope_jobs_with_pairs = [job for job in scope_jobs if int(job["pair_count"]) > 0]
+        pair_source_label = current_scanner_pair_source_label()
+        if not scope_jobs_with_pairs:
+            selected_label = view_scope or "all available universes"
+            scanner_status_div.text = (
+                f"<p>Scanner universe <b>{selected_label}</b> has no pair combinations for pair source "
+                f"<b>{pair_source_label}</b>, so there is nothing to scan.</p>"
+            )
+            return
+        defaults = build_defaults()
+        fee_mode = str(bybit_fee_mode_select.value or "")
+        oos_started_at = current_optimizer_oos_started_at()
+        cached_display_results = [
+            job["cached_result"]
+            for job in scope_jobs_with_pairs
+            if isinstance(job.get("cached_result"), OptimizerGridScanResult)
+        ]
+        resumable_pairs = sum(
+            int(job["cached_pairs"])
+            for job in scope_jobs_with_pairs
+            if isinstance(job.get("resume_result"), OptimizerGridScanResult)
+        )
+        total_pairs = sum(int(job["pair_count"]) for job in scope_jobs_with_pairs)
+        has_all_scope = any(job.get("universe_mode") == ScanUniverseMode.ALL for job in scope_jobs_with_pairs)
+        if view_scope is not None:
+            scope_display_label = view_scope
+        elif has_all_scope:
+            scope_display_label = "all instruments"
+        else:
+            scope_display_label = f"all ({len(scope_jobs_with_pairs)} universes)"
+        initial_result = combine_optimizer_grid_scan_results(cached_display_results)
+
+        scanner_request_context = {
+            "train_started_at": train_period[0],
+            "train_ended_at": train_period[1],
+            "oos_started_at": oos_started_at,
+            "scope_label": scope_display_label,
+            "search_signature": search_signature,
+            "initial_display_pairs": int(initial_result.summary.total_pairs_evaluated or 0),
+        }
+        scanner_cancel_event.clear()
+        apply_scanner_snapshot(initial_result, final=True)
+        scanner_progress["completed"] = resumable_pairs
+        scanner_progress["total"] = total_pairs
+        scanner_progress["stage"] = "Preparing scanner"
+        scanner_progress["workers"] = scanner_parallel_workers
+        scanner_progress["started_monotonic"] = monotonic()
+        mark_scanner_running()
+        scanner_live_state["version"] = 0
+        scanner_live_state["applied_version"] = 0
+        scanner_live_state["result"] = initial_result if cached_display_results else None
+        scanner_status_div.text = (
+            f"<p>Starting Scanner on <b>{scanner_parallel_workers}</b> workers. Train: "
+            f"<b>{train_period[0]:%Y-%m-%d %H:%M}</b> .. <b>{train_period[1]:%Y-%m-%d %H:%M} UTC</b>. "
+            f"OOS starts at <b>{oos_started_at:%Y-%m-%d %H:%M} UTC</b>. Scope: <b>{scope_display_label}</b>. "
+            f"Pair source: <b>{pair_source_label}</b>. "
+            f"Grid: <b>{trials_per_pair}</b> valid combinations per pair. "
+            f"{f'Resuming from <b>{resumable_pairs}</b> cached pairs. ' if resumable_pairs > 0 else ''}"
+            f"Keeps the top <b>10</b> rows for each pair "
+            f"by <b>Net</b>, using <b>R^2</b> as a secondary rank without a hard cutoff. "
+            f"Only rows with <b>Net &gt; 0</b> and <b>Trades &gt; 0</b> are kept.</p>"
+        )
+        scanner_future = scanner_executor.submit(
+            run_scanner_job,
+            Timeframe(timeframe_select.value),
+            train_period[0],
+            train_period[1],
+            oos_started_at,
+            defaults,
+            search_space,
+            fee_mode,
+            search_signature,
+            scope_jobs_with_pairs,
+            scanner_cancel_event.is_set,
+        )
+        if scanner_poll_callback is None:
+            scanner_poll_callback = doc.add_periodic_callback(poll_scanner_future, 250)
 
     def run_download_job(
         scope_value: str,
@@ -5608,7 +7738,7 @@ if (!targets.length) {
                 "message": "All requested parquet partitions already exist for the selected period.",
             }
 
-        common_root = default_common_root()
+        common_root = current_download_common_root()
         config_path = Path.cwd() / "codex_export_run.ini"
         written_partitions: list[str] = []
         written_symbols: set[str] = set()
@@ -5720,6 +7850,9 @@ if (!targets.length) {
 
     def on_run_download() -> None:
         nonlocal download_future, download_poll_callback
+        if scanner_is_running():
+            download_status_div.text = scanner_busy_message("running Downloader")
+            return
 
         if download_future is not None and not download_future.done():
             render_download_progress()
@@ -5760,6 +7893,7 @@ if (!targets.length) {
             download_poll_callback = doc.add_periodic_callback(poll_download_future, 250)
 
     def on_reset_defaults() -> None:
+        nonlocal scanner_request_context
         if optimization_future is not None and not optimization_future.done():
             optimization_cancel_event.set()
             mark_optimization_running(stopping=True)
@@ -5768,11 +7902,27 @@ if (!targets.length) {
         if scan_future is not None and not scan_future.done():
             scan_status_div.text = "<p>Johansen scan is still running. Wait for it to finish before reset.</p>"
             return
+        if scanner_future is not None and not scanner_future.done():
+            if not scanner_cancel_event.is_set():
+                scanner_cancel_event.set()
+                mark_scanner_running(stopping=True)
+                scanner_status_div.text = "<p>Stop requested before reset. Waiting for Scanner workers to terminate.</p>"
+            else:
+                scanner_status_div.text = "<p>Scanner stop already requested. Waiting for Scanner workers to terminate.</p>"
+            return
+        if portfolio_future is not None and not portfolio_future.done():
+            portfolio_status_div.text = "<p>Portfolio is still running. Wait for it to finish before reset.</p>"
+            return
         if download_future is not None and not download_future.done():
             download_status_div.text = "<p>Downloader is still running. Wait for it to finish before reset.</p>"
             return
         if wfa_future is not None and not wfa_future.done():
-            wfa_status_div.text = "<p>WFA is still running. Wait for it to finish before reset.</p>"
+            if not wfa_cancel_event.is_set():
+                wfa_cancel_event.set()
+                mark_wfa_running(stopping=True)
+                wfa_status_div.text = "<p>Stop requested before reset. Waiting for running workers to terminate.</p>"
+            else:
+                wfa_status_div.text = "<p>WFA stop already requested. Waiting for running workers to terminate.</p>"
             return
         if meta_future is not None and not meta_future.done():
             meta_status_div.text = "<p>Meta Selector is still running. Wait for it to finish before reset.</p>"
@@ -5830,6 +7980,7 @@ if (!targets.length) {
         wfa_unit_select.value = WfaWindowUnit.WEEKS.value
         wfa_lookback_input.value = 8
         wfa_test_input.value = 2
+        wfa_workers_input.value = optimizer_parallel_workers
         meta_model_select.value = default_meta_model()
         meta_objective_select.value = str(wfa_objective_select.value or "score_log_trades")
         meta_oos_start_picker.value = default_meta_oos_date.date().isoformat()
@@ -5852,6 +8003,8 @@ if (!targets.length) {
         scan_det_order_input.value = 0
         scan_k_ar_diff_input.value = 1
         scan_period_slider.value = (_ui_datetime(history_start), _ui_datetime(now_utc))
+        scanner_universe_select.value = GROUP_OPTIONS[0]
+        scanner_grid_trials_input.value = 200
         download_scope_select.value = DOWNLOAD_SCOPE_OPTIONS[0]
         download_group_select.value = GROUP_OPTIONS[0]
         download_policy_select.value = DOWNLOAD_POLICY_OPTIONS[0]
@@ -5876,7 +8029,22 @@ if (!targets.length) {
         reset_wfa_button()
         reset_meta_button()
         reset_scan_button()
+        reset_scanner_button()
+        reset_portfolio_button()
         reset_download_button()
+        scanner_request_context = None
+        scanner_live_state["version"] = 0
+        scanner_live_state["applied_version"] = 0
+        scanner_live_state["result"] = None
+        scanner_progress["started_monotonic"] = None
+        restore_saved_scanner_table(show_message=False)
+        if not scanner_table_source.data.get("trial_id", []):
+            scanner_status_div.text = (
+                "<p>Scanner uses the current optimizer grid ranges on the full available train history up to the "
+                "<b>Optimization Period</b> end, then keeps the top <b>10</b> profitable rows for each pair, "
+                "ranked by <b>Net</b> first and <b>R^2</b> second. <b>R^2 = 0.9</b> is a soft preference, not a hard cutoff. "
+                "Click <b>Estimate ETA</b> for a rough scope estimate.</p>"
+            )
         refresh_portfolio_table()
         apply_plot_display_settings()
         rebalance_layout()
@@ -5886,13 +8054,19 @@ if (!targets.length) {
 
     def on_session_destroyed(_session_context: object) -> None:
         optimization_cancel_event.set()
+        wfa_cancel_event.set()
+        scanner_cancel_event.set()
         clear_optimization_poll_callback()
         clear_scan_poll_callback()
+        clear_scanner_poll_callback()
+        clear_portfolio_poll_callback()
         clear_download_poll_callback()
         clear_wfa_poll_callback()
         clear_meta_poll_callback()
         optimization_executor.shutdown(wait=False, cancel_futures=True)
         scan_executor.shutdown(wait=False, cancel_futures=True)
+        scanner_executor.shutdown(wait=False, cancel_futures=True)
+        portfolio_executor.shutdown(wait=False, cancel_futures=True)
         download_executor.shutdown(wait=False, cancel_futures=True)
         wfa_executor.shutdown(wait=False, cancel_futures=True)
         meta_executor.shutdown(wait=False, cancel_futures=True)
@@ -5907,10 +8081,17 @@ if (!targets.length) {
     leg_2_cointegration_kind_select.on_change("value", on_leg2_cointegration_kind_change)
     timeframe_select.on_change("value", on_timeframe_change)
     scan_universe_select.on_change("value", on_scan_universe_change)
+    scanner_universe_select.on_change("value", on_scanner_universe_change)
+    scanner_cointegration_run_select.on_change("value", on_scanner_universe_change)
+    scanner_grid_trials_input.on_change("value", on_scanner_universe_change)
     scan_kind_select.on_change("value", on_scan_kind_change)
     download_group_select.on_change("value", on_download_group_change)
     download_scope_select.on_change("value", on_download_scope_change)
     bybit_fee_mode_select.on_change("value", on_bybit_fee_mode_change)
+    capital_input.on_change("value", on_optimization_config_change)
+    leverage_input.on_change("value", on_optimization_config_change)
+    margin_budget_input.on_change("value", on_optimization_config_change)
+    slippage_input.on_change("value", on_optimization_config_change)
     stop_mode_select.on_change("value", on_stop_mode_change)
     optimization_mode_select.on_change("value", on_optimization_mode_change)
     optimization_range_mode_select.on_change("value", on_optimization_range_mode_change)
@@ -5977,13 +8158,19 @@ if (!targets.length) {
         body.on_change("visible", on_section_visibility_change)
     service_log_toggle.on_click(toggle_service_log)
     service_log_body.on_change("visible", lambda _attr, _old, _new: sync_service_log_toggle())
+    doc.on_event(DocumentReady, on_document_ready)
     summary_div.on_change("text", build_service_log_handler("tester"))
     optimization_status_div.on_change("text", build_service_log_handler("optimizer"))
     scan_status_div.on_change("text", build_service_log_handler("cointegration"))
+    scanner_status_div.on_change("text", build_service_log_handler("scanner"))
     download_status_div.on_change("text", build_service_log_handler("downloader"))
     wfa_status_div.on_change("text", build_service_log_handler("wfa"))
     meta_status_div.on_change("text", build_service_log_handler("meta_selector"))
     portfolio_status_div.on_change("text", build_service_log_handler("portfolio"))
+    equity_plot.on_change("inner_width", on_equity_plot_geometry_change)
+    equity_plot.on_change("inner_height", on_equity_plot_geometry_change)
+    equity_plot.on_change("width", on_equity_plot_geometry_change)
+    equity_plot.on_change("height", on_equity_plot_geometry_change)
     state.shared_x_range.on_change("start", on_range_change)
     state.shared_x_range.on_change("end", on_range_change)
     portfolio_equity_plot.x_range.on_change("start", on_portfolio_range_change)
@@ -5994,12 +8181,15 @@ if (!targets.length) {
     meta_ranking_source.selected.on_change("indices", on_meta_ranking_selection)
     state.optimization_source.selected.on_change("indices", on_optimization_selection)
     state.scan_source.selected.on_change("indices", on_scan_selection)
+    scanner_table_source.selected.on_change("indices", on_scanner_selection)
     portfolio_table_source.selected.on_change("indices", on_portfolio_selection)
     portfolio_table_action_source.on_change("data", on_portfolio_table_action)
     run_button.on_click(on_run_test)
     add_to_portfolio_button.on_click(on_add_to_portfolio)
     optimization_run_button.on_click(on_run_optimization)
     scan_run_button.on_click(on_run_scan)
+    scanner_run_button.on_click(on_run_scanner)
+    scanner_eta_button.on_click(estimate_scanner_eta)
     download_run_button.on_click(on_run_download)
     wfa_run_button.on_click(on_run_wfa)
     meta_run_button.on_click(on_run_meta)
@@ -6022,6 +8212,7 @@ if (!targets.length) {
         wfa_toggle,
         meta_toggle,
         scan_toggle,
+        scanner_toggle,
         download_toggle,
         sizing_mode="stretch_width",
     )
@@ -6041,6 +8232,7 @@ if (!targets.length) {
         wfa_block,
         meta_block,
         scan_block,
+        scanner_block,
         download_block,
         Spacer(sizing_mode="stretch_both"),
         service_log_body,
@@ -6058,6 +8250,7 @@ if (!targets.length) {
     sync_symbol_2_filter(show_message=False)
     file_state_controller.restore()
     restore_saved_scan_table(show_message=False)
+    restore_saved_scanner_table(show_message=False)
     sync_downloader_mode_ui()
     sync_downloader_symbol_options(show_message=False)
     sync_bybit_fee_mode()
@@ -6069,14 +8262,16 @@ if (!targets.length) {
     append_service_log("tester", summary_div.text)
     append_service_log("optimizer", optimization_status_div.text)
     append_service_log("cointegration", scan_status_div.text)
+    append_service_log("scanner", scanner_status_div.text)
     append_service_log("downloader", download_status_div.text)
     append_service_log("wfa", wfa_status_div.text)
     append_service_log("meta_selector", meta_status_div.text)
     append_service_log("portfolio", portfolio_status_div.text)
     refresh_portfolio_table()
     restore_saved_wfa_result(show_message=False)
-    restore_saved_meta_result(show_message=False)
+    ui_bootstrap_complete = True
     ensure_nonempty_layout()
+    sync_section_toggle_states()
     sync_price_plot_labels()
     apply_plot_display_settings()
     rebalance_layout()

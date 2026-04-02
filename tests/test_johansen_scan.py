@@ -3,6 +3,7 @@ import numpy as np
 
 from domain.contracts import PairSelection, UnitRootGate, UnitRootTest
 from domain.scan.johansen import JohansenScanParameters, scan_pair_johansen_arrays
+from domain.scan.unit_root import UnitRootScreenResult
 
 
 def _random_walk(seed: int, size: int = 800) -> np.ndarray:
@@ -66,3 +67,38 @@ def test_johansen_scan_rejects_unsupported_det_order() -> None:
             unit_root_gate=UnitRootGate(test=UnitRootTest.ADF),
             params=JohansenScanParameters(k_ar_diff=1, det_order=2, significance_level=0.05),
         )
+
+
+def test_johansen_scan_uses_precomputed_unit_root_results(monkeypatch) -> None:
+    base = _random_walk(11) + 500.0
+    rng = np.random.default_rng(21)
+    pair_leg = base + rng.normal(loc=0.0, scale=0.5, size=base.size)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("pair-level unit-root screen should be skipped when cached results are provided")
+
+    monkeypatch.setattr("domain.scan.johansen_core.screen_pair_for_cointegration", fail_if_called)
+
+    cached = UnitRootScreenResult(
+        test=UnitRootTest.ADF,
+        alpha=0.05,
+        sample_size=int(base.size),
+        difference_order=1,
+        passes_gate=True,
+        inferred_order="I(1)",
+        level_non_stationary=True,
+        diff_stationary=True,
+    )
+
+    result = scan_pair_johansen_arrays(
+        pair=PairSelection(symbol_1="X", symbol_2="Y"),
+        leg_1_values=base,
+        leg_2_values=pair_leg,
+        unit_root_gate=UnitRootGate(test=UnitRootTest.ADF),
+        params=JohansenScanParameters(k_ar_diff=1, det_order=0, significance_level=0.05),
+        precomputed_leg_1=cached,
+        precomputed_leg_2=cached,
+    )
+
+    assert result.eligible_for_cointegration is True
+    assert result.threshold_passed is True

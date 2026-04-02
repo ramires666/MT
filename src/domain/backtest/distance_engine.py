@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import numpy as np
 import polars as pl
 
+from domain.backtest.metric_formulas import compute_equity_curve_metrics, duration_years_from_times
 from domain.backtest.distance_models import (
     TRADE_SCHEMA,
     DistanceBacktestResult,
@@ -146,6 +147,7 @@ def _build_summary(
     net_pnl: float,
     trades: pl.DataFrame,
     equity_total: np.ndarray,
+    times: list[object],
 ) -> dict[str, float | int | str]:
     trades_count = trades.height
     wins = trades.filter(pl.col("net_pnl") > 0).height if trades_count else 0
@@ -157,7 +159,7 @@ def _build_summary(
     slippage_cost = float(trades.get_column("slippage_cost_total").sum()) if trades_count else 0.0
     commission_cost = float(trades.get_column("commission_total").sum()) if trades_count else 0.0
     total_cost = spread_cost + slippage_cost + commission_cost
-    return {
+    summary = {
         "symbol_1": pair.symbol_1,
         "symbol_2": pair.symbol_2,
         "trades": trades_count,
@@ -175,6 +177,21 @@ def _build_summary(
         "max_drawdown": max_drawdown,
         "peak_equity": peak,
     }
+    curve_metrics = compute_equity_curve_metrics(
+        equity_total=equity_total,
+        initial_capital=float(defaults.initial_capital),
+        trades_count=trades_count,
+        wins=wins,
+        gross_profit=gross_pnl,
+        spread_cost=spread_cost,
+        slippage_cost=slippage_cost,
+        commission_cost=commission_cost,
+        net_profit=net_pnl,
+        duration_years=duration_years_from_times(times),
+    )
+    curve_metrics.pop("max_drawdown", None)
+    summary.update(curve_metrics)
+    return summary
 
 
 def _empty_result(pair: PairSelection) -> DistanceBacktestResult:
@@ -196,6 +213,11 @@ def _empty_metrics(defaults: StrategyDefaults) -> dict[str, float | int]:
         "score_log_trades": 0.0,
         "ulcer_index": 0.0,
         "ulcer_performance": 0.0,
+        "cagr": 0.0,
+        "cagr_to_ulcer": 0.0,
+        "r_squared": 0.0,
+        "calmar": 0.0,
+        "beauty_score": 0.0,
         "gross_profit": 0.0,
         "spread_cost": 0.0,
         "slippage_cost": 0.0,
@@ -206,42 +228,11 @@ def _empty_metrics(defaults: StrategyDefaults) -> dict[str, float | int]:
     }
 
 
-def _safe_ratio(numerator: float, denominator: float) -> float:
-    if abs(denominator) <= 1e-12:
-        return 0.0
-    return numerator / denominator
-
-
-def _compute_k_ratio(equity: np.ndarray) -> float:
-    if equity.size < 3:
-        return 0.0
-    clipped = np.maximum(equity, 1e-9)
-    y = np.log(clipped)
-    x = np.arange(y.size, dtype=np.float64)
-    x_mean = float(x.mean())
-    y_mean = float(y.mean())
-    ss_x = float(np.square(x - x_mean).sum())
-    if ss_x <= 1e-12:
-        return 0.0
-    slope = float(np.dot(x - x_mean, y - y_mean) / ss_x)
-    intercept = y_mean - slope * x_mean
-    residuals = y - (intercept + slope * x)
-    dof = y.size - 2
-    if dof <= 0:
-        return 0.0
-    sigma = float(np.sqrt(np.square(residuals).sum() / dof))
-    if sigma <= 1e-12:
-        return 0.0
-    slope_stderr = sigma / np.sqrt(ss_x)
-    if slope_stderr <= 1e-12:
-        return 0.0
-    return float(slope / slope_stderr)
-
-
 def _finalize_metrics(
     *,
     defaults: StrategyDefaults,
     equity_total: np.ndarray,
+    times: list[object],
     trades_count: int,
     wins: int,
     gross_profit: float,
@@ -252,36 +243,18 @@ def _finalize_metrics(
 ) -> dict[str, float | int]:
     if equity_total.size == 0:
         return _empty_metrics(defaults)
-
-    running_peak = np.maximum.accumulate(equity_total)
-    drawdown_abs = running_peak - equity_total
-    max_drawdown = float(drawdown_abs.max()) if drawdown_abs.size else 0.0
-    pnl_to_maxdd = _safe_ratio(net_profit, max_drawdown)
-    pnl_steps = np.diff(equity_total, prepend=equity_total[:1])
-    gains = float(np.clip(pnl_steps, 0.0, None).sum())
-    losses = float(np.clip(-pnl_steps, 0.0, None).sum())
-    omega_ratio = gains if losses <= 1e-12 else gains / losses
-    dd_pct = np.divide(drawdown_abs, running_peak, out=np.zeros_like(drawdown_abs), where=running_peak > 1e-12)
-    ulcer_index = float(np.sqrt(np.mean(dd_pct**2))) if dd_pct.size else 0.0
-    total_cost = spread_cost + slippage_cost + commission_cost
-    return {
-        "net_profit": float(net_profit),
-        "ending_equity": float(equity_total[-1]),
-        "max_drawdown": max_drawdown,
-        "pnl_to_maxdd": pnl_to_maxdd,
-        "omega_ratio": float(omega_ratio),
-        "k_ratio": _compute_k_ratio(equity_total),
-        "score_log_trades": pnl_to_maxdd * np.log(1.0 + max(0, trades_count)),
-        "ulcer_index": ulcer_index,
-        "ulcer_performance": _safe_ratio(net_profit, ulcer_index),
-        "gross_profit": float(gross_profit),
-        "spread_cost": float(spread_cost),
-        "slippage_cost": float(slippage_cost),
-        "commission_cost": float(commission_cost),
-        "total_cost": float(total_cost),
-        "trades": int(trades_count),
-        "win_rate": (wins / trades_count) if trades_count else 0.0,
-    }
+    return compute_equity_curve_metrics(
+        equity_total=equity_total,
+        initial_capital=float(defaults.initial_capital),
+        trades_count=trades_count,
+        wins=wins,
+        gross_profit=float(gross_profit),
+        spread_cost=float(spread_cost),
+        slippage_cost=float(slippage_cost),
+        commission_cost=float(commission_cost),
+        net_profit=float(net_profit),
+        duration_years=duration_years_from_times(times),
+    )
 
 
 def run_distance_backtest_metrics_frame(
@@ -455,6 +428,7 @@ def run_distance_backtest_metrics_frame(
     return _finalize_metrics(
         defaults=defaults_local,
         equity_total=equity_total,
+        times=context.times,
         trades_count=trades_count,
         wins=wins,
         gross_profit=gross_profit,
@@ -684,6 +658,7 @@ def run_distance_backtest_frame(
         net_pnl=net_pnl,
         trades=trades_frame,
         equity_total=equity_total,
+        times=result_frame.get_column("time").to_list(),
     )
     return DistanceBacktestResult(frame=result_frame, trades=trades_frame, summary=summary)
 

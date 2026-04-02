@@ -9,7 +9,7 @@ from bokeh_app.browser_state import BrowserStateBinding, attach_browser_state
 
 def test_attach_browser_state_adds_spinner_dom_persistence() -> None:
     spinner = Spinner(title="Lookback", value=48, step=1)
-    selector = Select(title="Mode", value="grid", options=["grid", "genetic"])
+    selector = Select(title="Mode", value="grid", options=[("grid", "grid, Grid Search"), ("genetic", "genetic, Genetic")])
     root = column(spinner, selector)
     doc = Document()
     doc.add_root(root)
@@ -28,6 +28,8 @@ def test_attach_browser_state_adds_spinner_dom_persistence() -> None:
     assert callbacks
     code = callbacks[0].code
     assert "bindNumericInputPersistence" in code
+    assert "selectOptionValues" in code
+    assert "Array.isArray(item)" in code
     assert "opt_lookback_start" in code
     assert "optimization_mode" in code
     assert "__mt_pair_state_save_all" in code

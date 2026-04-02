@@ -12,6 +12,7 @@ from storage.catalog import read_instrument_catalog
 from storage.quotes import raw_partition_path
 from tools.mt5_terminal_export_sync import (
     ExportJob,
+    coerce_platform_path,
     decode_exports,
     default_common_root,
     run_terminal_export,
@@ -65,7 +66,7 @@ def resolve_symbols(
         catalog = read_instrument_catalog(broker)
         if groups:
             for group in groups:
-                catalog = filter_catalog_by_group(catalog, group)
+                catalog = filter_catalog_by_group(catalog, group, broker=broker)
         symbols = catalog.get_column('symbol').sort().to_list() if not catalog.is_empty() else []
 
     if limit is not None:
@@ -120,13 +121,13 @@ def main() -> int:
         print('No symbols to export.')
         return 0
 
-    common_root = Path(args.common_root)
+    common_root = coerce_platform_path(args.common_root)
     config_path = Path.cwd() / 'codex_export_run.ini'
     for chunk_index, batch in enumerate(chunked(symbols, args.chunk_size), start=1):
         jobs = build_jobs(batch, started_at, ended_at)
         write_job_manifest(common_root=common_root, jobs=jobs)
         write_startup_config(config_path=config_path, chart_symbol=batch[0])
-        exit_code = run_terminal_export(terminal_path=Path(args.terminal_path), config_path=config_path)
+        exit_code = run_terminal_export(terminal_path=coerce_platform_path(args.terminal_path), config_path=config_path)
         written = decode_exports(common_root=common_root, broker=args.broker, jobs=jobs)
         print(f'chunk={chunk_index} terminal_exit={exit_code} symbols={len(batch)} written_partitions={len(written)}')
         for symbol in batch:

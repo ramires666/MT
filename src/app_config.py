@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     data_root: Path = Field(default=Path("data"))
     default_broker_id: str = "bybit_mt5"
     mt5_terminal_path: str | None = None
+    mt5_common_root: str | None = None
     broker_timezone_name: str = "UTC+2-fixed"
     broker_timezone_offset_minutes: int = 120
     default_initial_capital: float = 10_000.0
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     default_margin_budget_per_leg: float = 500.0
     default_slippage_points: float = 1.0
     optimizer_parallel_workers: int = 8
+    wfa_history_top_k: int = 32
     scan_parallel_workers: int = 8
     bybit_tradfi_fee_mode: str = "tight_spread"
 

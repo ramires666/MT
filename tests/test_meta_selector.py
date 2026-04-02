@@ -13,7 +13,7 @@ from domain.meta_selector import (
     load_saved_meta_selector_result,
     run_meta_selector,
 )
-from domain.meta_selector_ml import fit_predict
+from domain.meta_selector_ml import MAX_META_NUMERIC_ABS, fit_predict
 
 
 def test_run_meta_selector_decision_tree_ranks_saved_wfa_history(monkeypatch, tmp_path: Path) -> None:
@@ -126,6 +126,129 @@ def test_load_saved_meta_selector_result_reads_summary(monkeypatch, tmp_path: Pa
 
 def test_meta_selector_features_exclude_test_columns() -> None:
     assert all(not column.startswith("test_") for column in FEATURE_COLUMNS)
+
+
+def test_fit_predict_passes_new_metric_features_to_model(monkeypatch) -> None:
+    feature_index = {name: idx for idx, name in enumerate(FEATURE_COLUMNS)}
+    captured: dict[str, np.ndarray] = {}
+
+    def make_row(*, marker: float) -> dict[str, float]:
+        row = {column: 0.0 for column in FEATURE_COLUMNS}
+        row["lookback_bars"] = 48.0 + marker
+        row["entry_z"] = 1.5
+        row["exit_z"] = 0.3
+        row["stop_enabled"] = 1.0
+        row["stop_z_value"] = 3.0
+        row["bollinger_k"] = 2.0
+        row["train_objective_score"] = 1.0 + marker
+        row["train_cagr"] = 10.0 + marker
+        row["train_cagr_to_ulcer"] = 20.0 + marker
+        row["train_r_squared"] = 30.0 + marker
+        row["train_calmar"] = 40.0 + marker
+        row["train_beauty_score"] = 50.0 + marker
+        row["test_score_log_trades"] = 0.5 + marker
+        return row
+
+    training = pl.DataFrame([make_row(marker=float(idx)) for idx in range(4)])
+    scoring = pl.DataFrame([make_row(marker=99.0)])
+
+    class FakeModel:
+        def fit(self, x_train, y_train, **kwargs):
+            captured["x_train"] = np.asarray(x_train, dtype=np.float64)
+            captured["y_train"] = np.asarray(y_train, dtype=np.float64)
+            return self
+
+        def predict(self, x_score):
+            matrix = np.asarray(x_score, dtype=np.float64)
+            if "x_score" not in captured and matrix.shape[0] == scoring.height:
+                captured["x_score"] = matrix
+            return np.zeros(matrix.shape[0], dtype=np.float64)
+
+    monkeypatch.setattr("domain.meta_selector_ml.build_model", lambda model_type, config=None: FakeModel())
+    monkeypatch.setattr(
+        "domain.meta_selector_ml.validation_split",
+        lambda frame: (frame, pl.DataFrame(schema=frame.schema)),
+    )
+
+    fit_predict(
+        training,
+        scoring,
+        model_type="decision_tree",
+        target_metric="test_score_log_trades",
+    )
+
+    assert captured["x_train"][0, feature_index["train_cagr"]] == 10.0
+    assert captured["x_train"][0, feature_index["train_cagr_to_ulcer"]] == 20.0
+    assert captured["x_train"][0, feature_index["train_r_squared"]] == 30.0
+    assert captured["x_train"][0, feature_index["train_calmar"]] == 40.0
+    assert captured["x_train"][0, feature_index["train_beauty_score"]] == 50.0
+    assert captured["x_score"][0, feature_index["train_cagr"]] == 109.0
+    assert captured["x_score"][0, feature_index["train_cagr_to_ulcer"]] == 119.0
+    assert captured["x_score"][0, feature_index["train_r_squared"]] == 129.0
+    assert captured["x_score"][0, feature_index["train_calmar"]] == 139.0
+    assert captured["x_score"][0, feature_index["train_beauty_score"]] == 149.0
+
+
+def test_fit_predict_clips_extreme_feature_and_target_values(monkeypatch) -> None:
+    feature_index = {name: idx for idx, name in enumerate(FEATURE_COLUMNS)}
+    captured: dict[str, np.ndarray] = {}
+
+    def make_row(*, train_cagr: float, test_cagr: float) -> dict[str, float]:
+        row = {column: 0.0 for column in FEATURE_COLUMNS}
+        row["lookback_bars"] = 48.0
+        row["entry_z"] = 1.5
+        row["exit_z"] = 0.3
+        row["stop_enabled"] = 1.0
+        row["stop_z_value"] = 3.0
+        row["bollinger_k"] = 2.0
+        row["train_cagr"] = train_cagr
+        row["test_cagr"] = test_cagr
+        return row
+
+    training = pl.DataFrame(
+        [
+            make_row(train_cagr=float("inf"), test_cagr=float("inf")),
+            make_row(train_cagr=-float("inf"), test_cagr=-float("inf")),
+            make_row(train_cagr=1e300, test_cagr=1e300),
+            make_row(train_cagr=-1e300, test_cagr=-1e300),
+        ]
+    )
+    scoring = pl.DataFrame([make_row(train_cagr=float("inf"), test_cagr=0.0)])
+
+    class FakeModel:
+        def fit(self, x_train, y_train, **kwargs):
+            captured["x_train"] = np.asarray(x_train, dtype=np.float64)
+            captured["y_train"] = np.asarray(y_train, dtype=np.float64)
+            return self
+
+        def predict(self, x_score):
+            matrix = np.asarray(x_score, dtype=np.float64)
+            captured["x_score"] = matrix
+            return np.zeros(matrix.shape[0], dtype=np.float64)
+
+    monkeypatch.setattr("domain.meta_selector_ml.build_model", lambda model_type, config=None: FakeModel())
+    monkeypatch.setattr(
+        "domain.meta_selector_ml.validation_split",
+        lambda frame: (frame, pl.DataFrame(schema=frame.schema)),
+    )
+
+    fit_predict(
+        training,
+        scoring,
+        model_type="decision_tree",
+        target_metric="test_cagr",
+    )
+
+    assert np.isfinite(captured["y_train"]).all()
+    assert np.isfinite(captured["x_train"]).all()
+    assert np.isfinite(captured["x_score"]).all()
+    assert np.max(np.abs(captured["y_train"])) <= MAX_META_NUMERIC_ABS
+    assert np.max(np.abs(captured["x_train"])) <= MAX_META_NUMERIC_ABS
+    assert captured["y_train"][0] == MAX_META_NUMERIC_ABS
+    assert captured["y_train"][1] == -MAX_META_NUMERIC_ABS
+    assert captured["x_train"][0, feature_index["train_cagr"]] == MAX_META_NUMERIC_ABS
+    assert captured["x_train"][1, feature_index["train_cagr"]] == -MAX_META_NUMERIC_ABS
+    assert captured["x_score"][0, feature_index["train_cagr"]] == MAX_META_NUMERIC_ABS
 
 
 def test_latest_wfa_run_history_prefers_latest_created_at() -> None:

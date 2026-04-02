@@ -15,6 +15,11 @@ OBJECTIVE_METRICS = (
     "score_log_trades",
     "ulcer_index",
     "ulcer_performance",
+    "cagr",
+    "cagr_to_ulcer",
+    "r_squared",
+    "calmar",
+    "beauty_score",
 )
 
 
@@ -52,6 +57,11 @@ class DistanceOptimizationRow:
     score_log_trades: float
     ulcer_index: float
     ulcer_performance: float
+    cagr: float
+    cagr_to_ulcer: float
+    r_squared: float
+    calmar: float
+    beauty_score: float
     trades: int
     win_rate: float
     lookback_bars: int

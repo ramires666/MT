@@ -97,13 +97,17 @@ WSL example:
 
 ```dotenv
 MT_SERVICE_MT5_TERMINAL_PATH=/mnt/c/Program Files/Bybit MT5 Terminal/terminal64.exe
+MT_SERVICE_MT5_COMMON_ROOT=/mnt/c/Users/<WindowsUser>/AppData/Roaming/MetaQuotes/Terminal/Common/Files
 ```
 
 Windows example:
 
 ```dotenv
 MT_SERVICE_MT5_TERMINAL_PATH=C:\Program Files\Bybit MT5 Terminal\terminal64.exe
+MT_SERVICE_MT5_COMMON_ROOT=C:\Users\<WindowsUser>\AppData\Roaming\MetaQuotes\Terminal\Common\Files
 ```
+
+`MT_SERVICE_MT5_COMMON_ROOT` is optional. The app now auto-detects the terminal `Common\Files` location, including WSL setups that launch the Windows MT5 terminal, but setting it explicitly is safer when you have multiple Windows user profiles or multiple terminals installed.
 
 ## 3. Run the API
 

@@ -1,10 +1,11 @@
 ﻿from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from storage.quotes import write_m5_quotes
 from tools.mt5_binary_export import read_codex_binary
@@ -32,10 +33,62 @@ class ExportStatus:
 
 
 STATUS_FILE_NAME = "history_status.txt"
+WINDOWS_COMMON_ROOT_SUFFIX = Path("AppData") / "Roaming" / "MetaQuotes" / "Terminal" / "Common" / "Files"
+WINDOWS_USER_DIR_BLACKLIST = {"All Users", "Default", "Default User", "Public", "defaultuser0"}
+
+
+def coerce_platform_path(value: str | Path) -> Path:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return Path()
+    windows_path = PureWindowsPath(raw_value)
+    if os.name != "nt" and windows_path.drive:
+        drive = windows_path.drive.rstrip(":").lower()
+        converted = Path("/mnt") / drive
+        for part in windows_path.parts[1:]:
+            if part not in ("\\", "/"):
+                converted /= part
+        return converted
+    return Path(raw_value)
+
+
+def _windows_common_root_from_appdata(appdata_value: str | None) -> Path | None:
+    text = str(appdata_value or "").strip()
+    if not text:
+        return None
+    return coerce_platform_path(text) / "MetaQuotes" / "Terminal" / "Common" / "Files"
+
+
+def _iter_wsl_windows_common_root_candidates(users_root: Path | None = None) -> list[Path]:
+    root = users_root or Path("/mnt/c/Users")
+    if not root.exists():
+        return []
+    candidates: list[Path] = []
+    for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir() or child.name in WINDOWS_USER_DIR_BLACKLIST:
+            continue
+        candidates.append(child / WINDOWS_COMMON_ROOT_SUFFIX)
+    return candidates
 
 
 def default_common_root() -> Path:
-    return Path.home() / "AppData" / "Roaming" / "MetaQuotes" / "Terminal" / "Common" / "Files"
+    override = str(os.environ.get("MT_SERVICE_MT5_COMMON_ROOT", "") or "").strip()
+    if override:
+        return coerce_platform_path(override)
+
+    appdata_candidate = _windows_common_root_from_appdata(os.environ.get("APPDATA"))
+    if appdata_candidate is not None:
+        return appdata_candidate
+
+    if str(os.environ.get("WSL_DISTRO_NAME", "") or "").strip():
+        candidates = _iter_wsl_windows_common_root_candidates()
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        if len(candidates) == 1:
+            return candidates[0]
+
+    return Path.home() / WINDOWS_COMMON_ROOT_SUFFIX
 
 
 def codex_root(common_root: Path) -> Path:
@@ -75,7 +128,7 @@ def write_startup_config(config_path: Path, chart_symbol: str, script_name: str 
 
 
 def run_terminal_export(terminal_path: Path, config_path: Path) -> int:
-    completed = subprocess.run([str(terminal_path), f"/config:{config_path}"], check=False)
+    completed = subprocess.run([str(coerce_platform_path(terminal_path)), f"/config:{config_path}"], check=False)
     return completed.returncode
 
 
@@ -140,7 +193,7 @@ def main() -> int:
     args = build_parser().parse_args()
     started_at = datetime.fromisoformat(args.started_at).replace(tzinfo=UTC)
     ended_at = datetime.fromisoformat(args.ended_at).replace(tzinfo=UTC)
-    common_root = Path(args.common_root)
+    common_root = coerce_platform_path(args.common_root)
     jobs = [
         ExportJob(
             symbol=symbol,
@@ -155,7 +208,7 @@ def main() -> int:
     write_job_manifest(common_root=common_root, jobs=jobs)
     config_path = Path.cwd() / "codex_export_run.ini"
     write_startup_config(config_path=config_path, chart_symbol=jobs[0].symbol)
-    exit_code = run_terminal_export(terminal_path=Path(args.terminal_path), config_path=config_path)
+    exit_code = run_terminal_export(terminal_path=coerce_platform_path(args.terminal_path), config_path=config_path)
     statuses = read_export_statuses(common_root)
     written = decode_exports(common_root=common_root, broker=args.broker, jobs=jobs)
 

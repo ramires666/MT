@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Executor
 from datetime import UTC, datetime
 from typing import Any, Mapping, Sequence
 
@@ -38,6 +39,11 @@ def serialize_optimization_row(prefix: str, row: DistanceOptimizationRow) -> dic
         f"{prefix}_score_log_trades": round(float(row.score_log_trades), 6),
         f"{prefix}_ulcer_index": round(float(row.ulcer_index), 6),
         f"{prefix}_ulcer_performance": round(float(row.ulcer_performance), 6),
+        f"{prefix}_cagr": round(float(row.cagr), 6),
+        f"{prefix}_cagr_to_ulcer": round(float(row.cagr_to_ulcer), 6),
+        f"{prefix}_r_squared": round(float(row.r_squared), 6),
+        f"{prefix}_calmar": round(float(row.calmar), 6),
+        f"{prefix}_beauty_score": round(float(row.beauty_score), 6),
         f"{prefix}_trades": int(row.trades),
         f"{prefix}_win_rate": round(float(row.win_rate), 6),
         f"{prefix}_gross_profit": round(float(row.gross_profit), 6),
@@ -66,9 +72,16 @@ def build_fold_history_rows(
     step_units: int,
     unit: WfaWindowUnit,
     parallel_workers: int | None,
+    history_top_k: int | None = None,
+    cancel_check=None,
+    parallel_executor: Executor | None = None,
 ) -> list[dict[str, Any]]:
     if not optimization_rows or test_frame.is_empty():
         return []
+
+    selected_rows = list(optimization_rows)
+    if history_top_k is not None and history_top_k > 0:
+        selected_rows = selected_rows[: int(history_top_k)]
 
     tasks = [
         (
@@ -81,7 +94,7 @@ def build_fold_history_rows(
                 bollinger_k=float(row.bollinger_k),
             ),
         )
-        for row in optimization_rows
+        for row in selected_rows
     ]
     test_rows, _cancelled = _evaluate_params_parallel(
         tasks=tasks,
@@ -96,13 +109,14 @@ def build_fold_history_rows(
         spec_1=spec_1,
         spec_2=spec_2,
         parallel_workers=parallel_workers,
-        cancel_check=None,
+        cancel_check=cancel_check,
         progress_callback=None,
         progress_stage="WFA test evaluation",
+        executor=parallel_executor,
     )
     test_map = {int(row.trial_id): row for row in test_rows}
     history_rows: list[dict[str, Any]] = []
-    for train_rank, train_row in enumerate(optimization_rows, start=1):
+    for train_rank, train_row in enumerate(selected_rows, start=1):
         test_row = test_map.get(int(train_row.trial_id))
         if test_row is None:
             continue

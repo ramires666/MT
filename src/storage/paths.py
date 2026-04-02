@@ -21,6 +21,10 @@ def scans_root() -> Path:
     return get_settings().data_root / "scans"
 
 
+def scanner_root() -> Path:
+    return get_settings().data_root / "scanner"
+
+
 def ui_state_path() -> Path:
     return get_settings().data_root / "ui_state" / "bokeh_app_state.json"
 

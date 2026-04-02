@@ -1,0 +1,367 @@
+group_mt5,name,description
+CFDs\Indices Major,DJ30,Dow Jones Index Cash CFD (USD)
+CFDs\Indices Major,EU50,EUSTX50 Cash
+CFDs\Indices Major,FRA40,France 40 Index
+CFDs\Indices Major,GER40,GER40 Cash
+CFDs\Indices Major,NAS100,NAS100 Cash
+CFDs\Indices Major,SP500,S&P Index Cash CFD (USD)
+CFDs\Indices Major,SPI200,S&P/ASX 200 Index Cash CFD (AUD)
+CFDs\Indices Major,UK100,UK 100 Cash
+CFDs\Indices Minor,BVSPX,Bovespa Cash CFD (BRL)
+CFDs\Indices Minor,CHINA50,China A50 Index Cash CFD (USD)
+CFDs\Indices Minor,CHINAH,Hong Kong China H-shares Cash
+CFDs\Indices Minor,ES35,ES35 Index Cash
+CFDs\Indices Minor,HK50,Hang Seng Index Cash CFD (HKD)
+CFDs\Indices Minor,HKTECH,Hang Seng TECH Index CASH CFD  (HKD)
+CFDs\Indices Minor,NETH25,Netherlands 25 Cash
+CFDs\Indices Minor,SA40,South Africa 40 - CASH
+CFDs\Indices Minor,SGP20,Singapore 20 Index Cash CFD
+CFDs\Indices Minor,SWI20,Switzerland 20 Cash
+CFDs\Indices Minor,TWINDEX,Taiwan RIC Index Cash CFD
+CFDs\Indices Minor,US2000,US SMALL CAP 2000 - CASH
+Commodities,COPPER-C,Copper
+Commodities,Cocoa-C,US Cocoa - Cash
+Commodities,Coffee-C,Coffee Arabica - Cash
+Commodities,Cotton-C,Cotton - Cash
+Commodities,GAS-C,Gasoline
+Commodities,GASOIL-C,Low Sulphur Gasoil - Cash
+Commodities,NG-C,Natural Gas
+Commodities,OJ-C,Orange Juice - Cash
+Commodities,Soybean-C,Soybean - Cash
+Commodities,Sugar-C,Sugar Raw - Cash
+Commodities,Wheat-C,US Wheat (SRW) - Cash
+Commodities,XPDUSD,Palladium - Cash
+Commodities,XPTUSD,Platinum vs US Dollar
+Forex Major\Forex Exotic,USDZAR,US Dollar vs South African Rand
+Forex Major\Forex Exotic2,USDBRL,US Dollar vs Brazilian
+Forex Major\Forex Exotic2,USDCZK,US Dollar vs Czech Koruna
+Forex Major\Forex Exotic2,USDINR,US Dollar vs Indian Rupee
+Forex Major\Forex Exotic2,USDPLN,US Dollar vs Polish Zloty
+Forex Major\Forex Major,AUDUSD,Australian Dollar vs US Dollar
+Forex Major\Forex Major,EURUSD,Euro vs US Dollar
+Forex Major\Forex Major,GBPUSD,Great Britain Pound vs US Dollar
+Forex Major\Forex Major,USDCAD,US Dollar vs Canadian Dollar
+Forex Major\Forex Major,USDCHF,US Dollar vs Swiss Franc
+Forex Major\Forex Major,USDCLP,US Dollar vs Chile Peso
+Forex Major\Forex Major,USDCOP,US Dollar vs Colombia Peso
+Forex Major\Forex Major,USDIDR,US Dollar vs Indonesian Rupiah
+Forex Major\Forex Major,USDILS,US dollar vs Israeli Shekel
+Forex Major\Forex Major,USDJPY,US Dollar vs Japanese Yen
+Forex Major\Forex Major,USDKRW,US Dollar vs South Korean won
+Forex Major\Forex Major,USDTHB,United States Dollar vs Thai Baht
+Forex Major\Forex Major,USDTWD,US Dollar vs Taiwan Dollar
+Forex Major\Forex Minor,NZDUSD,New Zealand Dollar vs US Dollar
+Forex Major\Forex Minor,USDHKD,US Dollar vs Hong Kong Dollar
+Forex Major\Forex Minor,USDSGD,US Dollar vs Singapore Dollar
+Forex Major\Forex Minor,USTUSD,""
+Forex+\Forex Exotic,EURNOK+,Euro vs Norwegian Krone
+Forex+\Forex Exotic,EURSEK+,Euro vs Swedish Krona
+Forex+\Forex Exotic,USDMXN+,US Dollar vs Mexican Peso
+Forex+\Forex Exotic,USDZAR+,US Dollar vs South African Rand
+Forex+\Forex Major,AUDCAD+,Australian Dollar vs Canadian Dollar
+Forex+\Forex Major,AUDCHF+,Australian Dollar vs Swiss Franc
+Forex+\Forex Major,AUDJPY+,Australian Dollar vs Japanese Yen
+Forex+\Forex Major,AUDUSD+,Australian Dollar vs US Dollar
+Forex+\Forex Major,CADCHF+,Canadian Dollar vs Swiss Franc
+Forex+\Forex Major,CADJPY+,Canadian Dollar vs Japanese Yen
+Forex+\Forex Major,CHFJPY+,Swiss Franc vs Japanese Yen
+Forex+\Forex Major,EURAUD+,Euro vs Australian Dollar
+Forex+\Forex Major,EURCAD+,Euro vs Canadian Dollar
+Forex+\Forex Major,EURCHF+,Euro vs Swiss Franc
+Forex+\Forex Major,EURGBP+,Euro vs Great Britain Pound 
+Forex+\Forex Major,EURJPY+,Euro vs Japanese Yen
+Forex+\Forex Major,EURUSD+,Euro vs US Dollar
+Forex+\Forex Major,GBPAUD+,Great Britain Pound vs Australian Dollar
+Forex+\Forex Major,GBPCAD+,Great Britain Pound vs Canadian Dollar
+Forex+\Forex Major,GBPCHF+,Great Britain Pound vs Swiss Franc
+Forex+\Forex Major,GBPJPY+,Great Britain Pound vs Japanese Yen
+Forex+\Forex Major,GBPUSD+,Great Britain Pound vs US Dollar
+Forex+\Forex Major,USDCAD+,US Dollar vs Canadian Dollar
+Forex+\Forex Major,USDCHF+,US Dollar vs Swiss Franc
+Forex+\Forex Major,USDJPY+,US Dollar vs Japanese Yen
+Forex+\Forex Minor\Forex Minor -CFD,EURCZK+,Euro vs Czech Koruna
+Forex+\Forex Minor\Forex Minor -CFD,EURDKK+,Euro vs Danish Krone
+Forex+\Forex Minor\Forex Minor -CFD,EURHUF+,Euro vs Hungarian Forint
+Forex+\Forex Minor\Forex Minor -CFD,EURTRY+,Euro vs Turkish Lira
+Forex+\Forex Minor\Forex Minor -CFD,USDBRL+,US Dollar vs Brazilian
+Forex+\Forex Minor\Forex Minor -CFD,USDCLP+,US Dollar vs Chile Peso
+Forex+\Forex Minor\Forex Minor -CFD,USDCOP+,US Dollar vs Colombia Peso
+Forex+\Forex Minor\Forex Minor -CFD,USDCZK+,US Dollar vs Czech Koruna
+Forex+\Forex Minor\Forex Minor -CFD,USDDKK+,US Dollar vs Danish Krone
+Forex+\Forex Minor\Forex Minor -CFD,USDHUF+,US Dollar vs Hungarian Forint
+Forex+\Forex Minor\Forex Minor -CFD,USDIDR+,US Dollar vs Indonesian Rupiah
+Forex+\Forex Minor\Forex Minor -CFD,USDILS+,US dollar vs Israeli Shekel
+Forex+\Forex Minor\Forex Minor -CFD,USDINR+,US Dollar vs Indian Rupee
+Forex+\Forex Minor\Forex Minor -CFD,USDKRW+,US Dollar vs South Korean won
+Forex+\Forex Minor\Forex Minor -CFD,USDTHB+,United States Dollar vs Thai Baht
+Forex+\Forex Minor\Forex Minor -CFD,USDTRY+,US Dollar vs Turkish Lira
+Forex+\Forex Minor\Forex Minor -CFD,USDTWD+,US Dollar vs Taiwan Dollar
+Forex+\Forex Minor\Forex Minor -Forex,AUDCNH+,AU Dollar vs Chinese Yuan
+Forex+\Forex Minor\Forex Minor -Forex,AUDNZD+,Australian Dollar vs New Zealand Dollar
+Forex+\Forex Minor\Forex Minor -Forex,AUDSGD+,Australian Dollar vs Singapore Dollar
+Forex+\Forex Minor\Forex Minor -Forex,CHFSGD+,Swiss Franc vs Singapore Dollar
+Forex+\Forex Minor\Forex Minor -Forex,EURNZD+,Euro vs New Zealand Dollar
+Forex+\Forex Minor\Forex Minor -Forex,EURPLN+,Euro vs Polish Zloty
+Forex+\Forex Minor\Forex Minor -Forex,EURSGD+,Euro vs Singapore Dollar
+Forex+\Forex Minor\Forex Minor -Forex,GBPNZD+,Great Britain Pound vs New Zealand Dollar
+Forex+\Forex Minor\Forex Minor -Forex,GBPSGD+,Great Britain Pound vs Singapore Dollar
+Forex+\Forex Minor\Forex Minor -Forex,NZDCAD+,New Zealand Dollar vs Canadian Dollar
+Forex+\Forex Minor\Forex Minor -Forex,NZDCHF+,New Zealand Dollar vs Swiss Franc
+Forex+\Forex Minor\Forex Minor -Forex,NZDJPY+,New Zealand Dollar vs Japanese Yen
+Forex+\Forex Minor\Forex Minor -Forex,NZDSGD+,New Zealand Dollar vs Singapore Dollar
+Forex+\Forex Minor\Forex Minor -Forex,NZDUSD+,New Zealand Dollar vs US Dollar
+Forex+\Forex Minor\Forex Minor -Forex,SGDJPY+,Singapore Dollar vs Japanese Yen
+Forex+\Forex Minor\Forex Minor -Forex,USDCNH+,US Dollar vs Chinese Yuan
+Forex+\Forex Minor\Forex Minor -Forex,USDNOK+,US Dollar vs Norwegian Krone
+Forex+\Forex Minor\Forex Minor -Forex,USDPLN+,US Dollar vs Polish Zloty
+Forex+\Forex Minor\Forex Minor -Forex,USDSEK+,US Dollar vs Swedish Krona
+Forex+\Forex Minor\Forex Minor -Forex,USDSGD+,US Dollar vs Singapore Dollar
+Gold+,XAUAUD+,Gold vs Australian Dollar
+Gold+,XAUEUR+,Gold / Euro
+Gold+,XAUJPY+,Gold vs Japanese Yen
+Gold+,XAUUSD+,Gold US Dollar
+Nikkei,Nikkei225,Nikkei Index Cash CFD (JPY)
+Oil,UKOUSD,Brent Crude Oil Cash
+Oil,USOUSD,WTI Crude Oil Cash
+Silver,XAGAUD,Silver vs Australian Dollar
+Silver,XAGUSD,Silver US Dollar
+Stocks\US,AALG,AMERICAN AIRLINES GROUP INC
+Stocks\US,AAPL,Apple Inc.
+Stocks\US,ABBVIE,ABBVIE INC
+Stocks\US,ABNB,Airbnb Inc
+Stocks\US,ACN,Accenture PLC - Class A
+Stocks\US,ADBE,Adobe Inc
+Stocks\US,AFG,American Financial Group Inc
+Stocks\US,ALIBABA,ALIBABA GROUP HOLDING-SP ADR
+Stocks\US,AMAT,Applied Materials Inc
+Stocks\US,AMAZON,AMAZON.COM INC
+Stocks\US,AMD,Advanced Micro Devices / AMD
+Stocks\US,AMGN,Amgen Inc
+Stocks\US,APP,AppLovin Corp - Class A
+Stocks\US,ASML-US,ASML Holding NV
+Stocks\US,AT&T,AT&T INC
+Stocks\US,AVGO,Broadcom Inc
+Stocks\US,AXP,American Express Co
+Stocks\US,BAC,BANK OF AMERICA CORP
+Stocks\US,BAIDU,BAIDU INC - SPON ADR
+Stocks\US,BBD,Banco Bradesco
+Stocks\US,BBWI,Bath & Body Works Inc
+Stocks\US,BE,Bloom Energy Corp
+Stocks\US,BEN,Franklin Resources Inc
+Stocks\US,BITF,Bitfarms Ltd
+Stocks\US,BKNG,Booking Holdings Inc
+Stocks\US,BLK,Blackrock Inc
+Stocks\US,BLSH,Bullish Inc.
+Stocks\US,BMBL,Bumble Inc
+Stocks\US,BMNR,BitMine Immersion Technologies Inc
+Stocks\US,BNTX,BIONTECH SE-ADR
+Stocks\US,BOEING,BOEING CO/THE
+Stocks\US,BRKB,Berkshire Hathaway Inc - Class B
+Stocks\US,BUD,ANHEUSER-BUSCH INBEV SPN ADR
+Stocks\US,BYND,Beyond Meat
+Stocks\US,CAH,Cardinal Health Inc
+Stocks\US,CAT,Caterpillar Inc
+Stocks\US,CDNS,Cadence Design Systems Inc
+Stocks\US,CIM,Chimera Investment Corp
+Stocks\US,CISCO,CISCO SYSTEMS INC
+Stocks\US,CITI,CITIGROUP INC
+Stocks\US,CL,Colgate-Palmolive Co
+Stocks\US,CLS,Celestica Inc
+Stocks\US,CLSK,CleanSpark Inc
+Stocks\US,CMCSA,COMCAST CORP-CLASS A
+Stocks\US,COHR,Coherent Corp
+Stocks\US,COIN,COINBASE GLOBAL INC -CLASS A
+Stocks\US,COR,Cencora Inc.
+Stocks\US,COST,Costco Wholesale Corp
+Stocks\US,CRCL,Circle Internet Group Inc
+Stocks\US,CRDO,Credo Technology Group Holding Ltd
+Stocks\US,CRM,SALESFORCE.COM INC
+Stocks\US,CRWD,Crowdstrike Holdings Inc
+Stocks\US,CTRA,Coterra Energy Inc
+Stocks\US,CVX,CHEVRON CORP
+Stocks\US,DAL,Delta Air Lines Inc
+Stocks\US,DAVE,Dave Inc
+Stocks\US,DDOG,Datadog Inc - Class A
+Stocks\US,DELL,Dell Technologies Inc
+Stocks\US,DISNEY,WALT DISNEY CO/THE
+Stocks\US,DLTR,Dollar Tree Inc
+Stocks\US,DOCU,DocuSign Inc
+Stocks\US,DXC,DXC Technology Corp
+Stocks\US,EQR,Equity Residential
+Stocks\US,ESS,Essex Property Trust Inc
+Stocks\US,EXPE,Expedia Group Inc
+Stocks\US,EXXON,EXXON MOBIL CORP
+Stocks\US,F,Ford Motor Co
+Stocks\US,FCEL,FuelCell Energy Inc
+Stocks\US,FDX,FedEx Corp
+Stocks\US,FIG,Figma Inc
+Stocks\US,FITB,Fifth Third Bancorp
+Stocks\US,FOX,Fox Corp - Class B
+Stocks\US,FSLR,First Solar Inc
+Stocks\US,FTNT,Fortinet Inc
+Stocks\US,FUTU,Futu Holdings Ltd
+Stocks\US,GILD,Gilead Sciences Inc
+Stocks\US,GLXY,Galaxy Digital Inc.
+Stocks\US,GM,General Motors Co
+Stocks\US,GNRC,Generac Holdings Inc
+Stocks\US,GOOG,ALPHABET INC-CL C
+Stocks\US,GRAB,Grab Holdings Ltd (ADRs)
+Stocks\US,GS,Goldman Sachs Group Inc
+Stocks\US,HD,HOME DEPOT INC
+Stocks\US,HON,HONEYWELL INTERNATIONAL INC
+Stocks\US,HOOD,ROBINHOOD MARKETS INC - A
+Stocks\US,HPE,Hewlett Packard Enterprise Co / HPE
+Stocks\US,HSBCn,HSBC HOLDINGS PLC-SPONS ADR
+Stocks\US,HTHT,Huazhu Group Ltd
+Stocks\US,HUT,Hut 8 Mining Corp
+Stocks\US,IBM,INTL BUSINESS MACHINES CORP
+Stocks\US,IBN,ICICI Bank Ltd (ADRs)
+Stocks\US,ICL,ICL Group Ltd (ADRs)
+Stocks\US,INSM,Insmed Incorporated
+Stocks\US,INTEL,INTEL CORP
+Stocks\US,INTU,Intuit Inc
+Stocks\US,IP,International Paper Co
+Stocks\US,IR,Ingersoll Rand Inc
+Stocks\US,ISRG,Intuitive Surgical Inc
+Stocks\US,ITW,Illinois Tool Works / ITW
+Stocks\US,JBL,Jabil Inc
+Stocks\US,JD,JD.COM INC-ADR
+Stocks\US,JNJ,JOHNSON & JOHNSON
+Stocks\US,JPM,JPMORGAN CHASE & CO
+Stocks\US,KO,COCA-COLA CO/THE
+Stocks\US,LAC,Lithium Americas Corp
+Stocks\US,LAUR,Laureate Education Inc
+Stocks\US,LBTYK,Liberty Global Ltd. Class C
+Stocks\US,LI,LI AUTO INC - ADR
+Stocks\US,LITE,Lumentum Holdings Inc
+Stocks\US,LLY,Eli Lilly & Co
+Stocks\US,LMT,Lockheed Martin Corp
+Stocks\US,LPL,LG Display Co Ltd (ADRs)
+Stocks\US,LRCX,Lam Research Corp
+Stocks\US,LULU,LULULEMON ATHLETICA INC
+Stocks\US,LYB,LyondellBasell Industries - Class A
+Stocks\US,LYFT,Lyft Inc
+Stocks\US,MA,MASTERCARD INC - A
+Stocks\US,MARA,"Marathon Digital Holdings, Inc"
+Stocks\US,MAT,Mattel Inc
+Stocks\US,MCD,MCDONALD'S CORP
+Stocks\US,MCK,Mckesson Corp
+Stocks\US,MELI,Mercado Libre
+Stocks\US,MET,Metlife Inc
+Stocks\US,META,Meta Platforms Inc
+Stocks\US,MFA,MFA Financial Inc
+Stocks\US,MMM,3M CO
+Stocks\US,MOH,Molina Healthcare Inc
+Stocks\US,MPLX,MPLX LP
+Stocks\US,MRK,Merck & Co Inc
+Stocks\US,MRNA,MODERNA INC
+Stocks\US,MRVL,Marvell Technology Group Ltd
+Stocks\US,MS,Morgan Stanley
+Stocks\US,MSFT,MICROSOFT  CORP
+Stocks\US,MSTR,Strategy Inc.
+Stocks\US,MU,Micron Technology Inc
+Stocks\US,NEM,Newmont Mining
+Stocks\US,NFLX,NETFLIX INC
+Stocks\US,NIO,NIO INC - ADR
+Stocks\US,NKE,Nike Inc
+Stocks\US,NOC,Northrop Grumman Corp
+Stocks\US,NOW,ServiceNow Inc
+Stocks\US,NTAP,Netapp Inc
+Stocks\US,NTES,NETEASE INC-ADR
+Stocks\US,NVIDIA,NVIDIA CORP
+Stocks\US,NVS,NOVARTIS AG-SPONSORED ADR
+Stocks\US,NWS,News Corp - Class B
+Stocks\US,OKLO,Oklo Inc
+Stocks\US,OKTA,Okta Inc
+Stocks\US,ORCL,ORACLE CORP
+Stocks\US,OXY,Occidental Petroleum Corp
+Stocks\US,PDD,Pinduoduo Inc (ADRs)
+Stocks\US,PEG,Public Service Enterprise Group / PSEG
+Stocks\US,PENN,Penn National Gaming Inc
+Stocks\US,PEP,PEPSICO INC
+Stocks\US,PFIZER,PFIZER INC
+Stocks\US,PG,PROCTER & GAMBLE CO/THE
+Stocks\US,PGR,Progressive Corp
+Stocks\US,PLAY,Dave & Buster's Entertainmen
+Stocks\US,PLTR,Palantir Technologies Inc
+Stocks\US,PM,PHILIP MORRIS INTERNATIONAL
+Stocks\US,POOL,Pool Corp
+Stocks\US,PPL,PPL Corp
+Stocks\US,PSIX,Power Solutions International Inc
+Stocks\US,PVH,PVH Corp
+Stocks\US,PYPL,PayPal Holdings Inc
+Stocks\US,QCOM,QUALCOMM Inc
+Stocks\US,QQQ,Invesco QQQ Trust Series 1 ETF
+Stocks\US,RACE,Ferrari NV
+Stocks\US,RBLX,Roblox Corp - Class A
+Stocks\US,REGN,Regeneron Pharmaceuticals
+Stocks\US,RF,Regions Financial Corp
+Stocks\US,RIOT,"Riot Platforms, Inc"
+Stocks\US,RIVN,Rivian Automotive Inc
+Stocks\US,RKLB,Rocket Lab Corp
+Stocks\US,ROKU,Roku Inc
+Stocks\US,ROST,Ross Stores Inc
+Stocks\US,RSG,Republic Services Inc
+Stocks\US,SBET,SharpLink Gaming Inc
+Stocks\US,SBUX,STARBUCKS CORP
+Stocks\US,SE,SEA LTD-ADR
+Stocks\US,SHOP,SHOPIFY INC - CLASS A
+Stocks\US,SIG,Signet Jewelers Ltd
+Stocks\US,SMG,ScottsMiracle-Gro Co
+Stocks\US,SNAP,Snap Inc
+Stocks\US,SNOW,SNOWFLAKE INC-CLASS A
+Stocks\US,SNPS,Synopsys Inc
+Stocks\US,SOFI,SoFi Technologies Inc
+Stocks\US,SPCE,VIRGIN GALACTIC HOLDINGS INC
+Stocks\US,SPG,Simon Property Group Inc
+Stocks\US,SPGI,S&P Global Inc
+Stocks\US,SPOT,Spotify Technology SA
+Stocks\US,SRE,Sempra Energy
+Stocks\US,STRL,Sterling Infrastructure Inc
+Stocks\US,STX,Seagate
+Stocks\US,STZ,Constellation Brands Inc - Class A
+Stocks\US,SWK,Stanley Black & Decker Inc
+Stocks\US,TCOM,Trip.com Group Ltd
+Stocks\US,TEAM,Atlassian Corp PLC - Class A
+Stocks\US,TFC,Truist Financial Corp
+Stocks\US,TGT,Target Corp
+Stocks\US,TLN,Talen Energy Corp
+Stocks\US,TME,Tencent Music Entertainment Group – ADR
+Stocks\US,TOYOTA,TOYOTA MOTOR CORP -SPON ADR
+Stocks\US,TQQQ,ProShares UltraPro QQQ ETF
+Stocks\US,TRMB,TRIMBLE INC
+Stocks\US,TROW,T. Rowe Price Group Inc
+Stocks\US,TRV,The Travelers Companies Inc
+Stocks\US,TSLA,Tesla
+Stocks\US,TSM,TAIWAN SEMICONDUCTOR-SP ADR
+Stocks\US,TTD,The Trade Desk Inc - Class A
+Stocks\US,TTWO,Take-Two Interactive SoftwareInc
+Stocks\US,TWLO,Twilio Inc - Class A
+Stocks\US,TXN,Texas Instruments Inc
+Stocks\US,U,UNITY SOFTWARE INC
+Stocks\US,UBER,Uber Technologies Inc
+Stocks\US,UL,Unilever Plc
+Stocks\US,ULTA,Ulta Beauty Inc
+Stocks\US,UMC,United Microelectronics Corp (ADRs)
+Stocks\US,UNH,UNITEDHEALTH GROUP INC
+Stocks\US,UPS,United Parcel Service Inc
+Stocks\US,UPST,Upstart Holdings Inc
+Stocks\US,URNM,Sprott Uranium Miners ETF
+Stocks\US,USB,U.S. Bancorp
+Stocks\US,VISA,VISA INC-CLASS A SHARES
+Stocks\US,VRT,Vertiv Holdings Co
+Stocks\US,VZ,VERIZON COMMUNICATIONS INC
+Stocks\US,WDAY,Workday Inc - Class A
+Stocks\US,WDC,Western Digital Corp
+Stocks\US,WEN,Wendy's Co
+Stocks\US,WFC,WELLS FARGO & CO
+Stocks\US,WM,Waste Management Inc
+Stocks\US,WMT,WALMART INC
+Stocks\US,WPM,Wheaton Precious Metals Corp
+Stocks\US,WU,Western Union Co
+Stocks\US,WY,Weyerhaeuser Co
+Stocks\US,XPEV,XPENG INC - ADR
+Stocks\US,YUM,Yum! Brands Inc
+Stocks\US,YUMC,Yum China Holdings Inc
+Stocks\US,ZIM,Zim Integrated Shipping Services Ltd (ADRs)
+Stocks\US,ZM,ZOOM VIDEO COMMUNICATIONS-A

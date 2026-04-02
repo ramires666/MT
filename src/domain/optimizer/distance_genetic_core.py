@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Executor
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
@@ -120,6 +121,7 @@ def evaluate_candidates_into_cache(
     progress_callback: ProgressCallback | None = None,
     progress_stage: str = "Genetic search",
     progress_total: int = 0,
+    executor: Executor | None = None,
 ) -> tuple[int, bool]:
     task_items = []
     task_signatures: dict[Candidate, tuple[int, float, float, float | None]] = {}
@@ -171,6 +173,7 @@ def evaluate_candidates_into_cache(
         progress_total=progress_total,
         progress_stage=progress_stage,
         completed_offset=len(cache),
+        executor=executor,
     )
     rows_by_signature: dict[tuple[int, float, float, float | None], DistanceOptimizationRow] = {}
     for candidate, row in results:

@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from math import isfinite
 from typing import Sequence
 
+from bokeh.models import Button
+
 
 DEFAULT_BOUNDS = (0.0, 1.0)
 
@@ -47,6 +49,7 @@ def compute_overlay_label_layout(
     min_font_px: int = 8,
     max_rows: int = 3,
     vertical_anchor: str = "bottom",
+    horizontal_anchor: str = "center",
 ) -> tuple[int, list[tuple[int, int]]]:
     if not texts:
         return max(int(min_font_px), int(base_font_px)), []
@@ -74,6 +77,7 @@ def compute_overlay_label_layout(
         row_height = max(28, int(font_px * 3.1))
         positions: list[tuple[int, int]] = []
         anchor = "top" if str(vertical_anchor or "").lower() == "top" else "bottom"
+        horizontal = str(horizontal_anchor or "").lower()
         top_baseline = max(int(baseline_y) + (row_count - 1) * row_height, available_height - int(top_margin))
         for row_index, start in enumerate(range(0, len(widths), columns)):
             row_widths = list(widths[start : start + columns])
@@ -85,7 +89,12 @@ def compute_overlay_label_layout(
                 )
                 row_widths = [width * squeeze_ratio for width in row_widths]
                 row_total = sum(row_widths) + int(gap) * max(0, len(row_widths) - 1)
-            cursor_x = int(left_margin) + max(0.0, (available_width - row_total) / 2.0)
+            if horizontal == "right":
+                cursor_x = int(left_margin) + max(0.0, available_width - row_total)
+            elif horizontal == "left":
+                cursor_x = int(left_margin)
+            else:
+                cursor_x = int(left_margin) + max(0.0, (available_width - row_total) / 2.0)
             if anchor == "top":
                 y = top_baseline - row_index * row_height
             else:
@@ -209,3 +218,8 @@ def compute_relative_plot_height(
     if plot_key in {"price_1", "price_2"}:
         return max(int(min_height), height - int(emphasis_delta))
     return height
+
+
+def sync_toggle_button_types(bindings: Sequence[tuple[object, Button]]) -> None:
+    for body, toggle in bindings:
+        toggle.button_type = "primary" if bool(getattr(body, "visible", False)) else "default"

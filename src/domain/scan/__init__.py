@@ -11,6 +11,15 @@ from domain.scan.johansen import (
     scan_symbol_frames_johansen,
     scan_universe_johansen,
 )
+from domain.scan.optimizer_grid_scan import (
+    OptimizerGridScanResult,
+    OptimizerGridScanRow,
+    OptimizerGridScanSummary,
+    combine_optimizer_grid_scan_results,
+    filter_optimizer_grid_scan_result,
+    scan_symbol_frames_optimizer_grid,
+    scan_universe_optimizer_grid,
+)
 from domain.scan.unit_root import (
     PairUnitRootScreenResult,
     UnitRootScreenResult,
@@ -24,6 +33,11 @@ __all__ = [
     'JohansenUniverseScanResult',
     'JohansenUniverseScanRow',
     'JohansenUniverseScanSummary',
+    'OptimizerGridScanResult',
+    'OptimizerGridScanRow',
+    'OptimizerGridScanSummary',
+    'combine_optimizer_grid_scan_results',
+    'filter_optimizer_grid_scan_result',
     'PairUnitRootScreenResult',
     'UnitRootScreenResult',
     'resolve_scan_symbols',
@@ -31,7 +45,9 @@ __all__ = [
     'scan_pair_johansen',
     'scan_pair_johansen_arrays',
     'scan_symbol_frames_johansen',
+    'scan_symbol_frames_optimizer_grid',
     'scan_universe_johansen',
+    'scan_universe_optimizer_grid',
     'screen_pair_for_cointegration',
     'screen_series_for_cointegration',
 ]

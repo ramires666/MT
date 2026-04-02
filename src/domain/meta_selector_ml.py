@@ -12,6 +12,7 @@ from sklearn.tree import DecisionTreeRegressor
 from domain.meta_selector_types import FEATURE_COLUMNS, NUMERIC_FILL_COLUMNS, PARAMETER_COLUMNS
 
 XGBOOST_EARLY_STOPPING_ROUNDS = 30
+MAX_META_NUMERIC_ABS = 1_000_000_000_000.0
 
 
 def with_time_columns(frame: pl.DataFrame) -> pl.DataFrame:
@@ -53,10 +54,32 @@ def with_engineered_columns(frame: pl.DataFrame) -> pl.DataFrame:
         pl.col("test_trades").cast(pl.Float64).alias("test_trades"),
     ])
     fill_exprs = [
-        pl.col(column).cast(pl.Float64).fill_null(0.0).fill_nan(0.0).alias(column)
+        pl.col(column).cast(pl.Float64).fill_null(0.0).fill_nan(0.0).clip(-MAX_META_NUMERIC_ABS, MAX_META_NUMERIC_ABS).alias(column)
         for column in NUMERIC_FILL_COLUMNS
     ]
     return result.with_columns(fill_exprs)
+
+
+def _sanitize_numeric_matrix(values: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(values, dtype=np.float64)
+    matrix = np.nan_to_num(
+        matrix,
+        nan=0.0,
+        posinf=MAX_META_NUMERIC_ABS,
+        neginf=-MAX_META_NUMERIC_ABS,
+    )
+    return np.clip(matrix, -MAX_META_NUMERIC_ABS, MAX_META_NUMERIC_ABS)
+
+
+def _sanitize_numeric_vector(values: np.ndarray) -> np.ndarray:
+    vector = np.asarray(values, dtype=np.float64)
+    vector = np.nan_to_num(
+        vector,
+        nan=0.0,
+        posinf=MAX_META_NUMERIC_ABS,
+        neginf=-MAX_META_NUMERIC_ABS,
+    )
+    return np.clip(vector, -MAX_META_NUMERIC_ABS, MAX_META_NUMERIC_ABS)
 
 
 def normalized_model_config(model_type: str, config: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -234,7 +257,11 @@ def fit_predict(
         raise ValueError(f"Target metric '{target_metric}' is not available in WFA history.")
     if training.height < 4:
         raise ValueError("Meta Selector needs at least 4 pre-OOS optimization rows.")
-    x_score = scoring.select(FEATURE_COLUMNS).to_numpy() if not scoring.is_empty() else np.empty((0, len(FEATURE_COLUMNS)))
+    x_score = (
+        _sanitize_numeric_matrix(scoring.select(FEATURE_COLUMNS).to_numpy())
+        if not scoring.is_empty()
+        else np.empty((0, len(FEATURE_COLUMNS)))
+    )
 
     split_train, split_validation = validation_split(training)
     validation_mae = None
@@ -245,10 +272,10 @@ def fit_predict(
     quality_metrics: dict[str, Any] = {}
     if not split_validation.is_empty() and split_train.height >= 3:
         model = build_model(model_type, normalized_config)
-        x_train = split_train.select(FEATURE_COLUMNS).to_numpy()
-        y_train = split_train.get_column(target_metric).to_numpy()
-        x_validation = split_validation.select(FEATURE_COLUMNS).to_numpy()
-        y_validation = split_validation.get_column(target_metric).to_numpy()
+        x_train = _sanitize_numeric_matrix(split_train.select(FEATURE_COLUMNS).to_numpy())
+        y_train = _sanitize_numeric_vector(split_train.get_column(target_metric).to_numpy())
+        x_validation = _sanitize_numeric_matrix(split_validation.select(FEATURE_COLUMNS).to_numpy())
+        y_validation = _sanitize_numeric_vector(split_validation.get_column(target_metric).to_numpy())
         model = _fit_with_optional_early_stopping(
             model,
             model_type=model_type,
@@ -281,8 +308,8 @@ def fit_predict(
             )
 
     final_model = build_model(model_type, final_model_config)
-    x_training = training.select(FEATURE_COLUMNS).to_numpy()
-    y_training = training.get_column(target_metric).to_numpy()
+    x_training = _sanitize_numeric_matrix(training.select(FEATURE_COLUMNS).to_numpy())
+    y_training = _sanitize_numeric_vector(training.get_column(target_metric).to_numpy())
     final_model.fit(x_training, y_training)
     training_pred = final_model.predict(x_training)
     quality_metrics.update(_regression_quality("train", y_training, training_pred))
@@ -309,9 +336,19 @@ def rank_parameter_sets(frame: pl.DataFrame, predictions: np.ndarray) -> list[di
             pl.col(test_score_column).mean().alias("actual_test_score_mean"),
             pl.col("test_net_profit").mean().alias("actual_test_net_mean"),
             pl.col("test_max_drawdown").mean().alias("actual_test_maxdd_mean"),
+            pl.col("test_cagr").mean().alias("actual_test_cagr_mean"),
+            pl.col("test_cagr_to_ulcer").mean().alias("actual_test_cagr_to_ulcer_mean"),
+            pl.col("test_r_squared").mean().alias("actual_test_r_squared_mean"),
+            pl.col("test_calmar").mean().alias("actual_test_calmar_mean"),
+            pl.col("test_beauty_score").mean().alias("actual_test_beauty_mean"),
             pl.col("test_trades").mean().alias("actual_test_trades_mean"),
             pl.col(train_score_column).mean().alias("train_score_mean"),
             pl.col("train_net_profit").mean().alias("train_net_mean"),
+            pl.col("train_cagr").mean().alias("train_cagr_mean"),
+            pl.col("train_cagr_to_ulcer").mean().alias("train_cagr_to_ulcer_mean"),
+            pl.col("train_r_squared").mean().alias("train_r_squared_mean"),
+            pl.col("train_calmar").mean().alias("train_calmar_mean"),
+            pl.col("train_beauty_score").mean().alias("train_beauty_mean"),
             pl.col("train_pnl_to_maxdd").mean().alias("train_pnl_to_maxdd_mean"),
         )
         .with_columns(
@@ -344,9 +381,19 @@ def rank_parameter_sets(frame: pl.DataFrame, predictions: np.ndarray) -> list[di
                 "actual_test_score_mean": float(row.get("actual_test_score_mean", 0.0) or 0.0),
                 "actual_test_net_mean": float(row.get("actual_test_net_mean", 0.0) or 0.0),
                 "actual_test_maxdd_mean": float(row.get("actual_test_maxdd_mean", 0.0) or 0.0),
+                "actual_test_cagr_mean": float(row.get("actual_test_cagr_mean", 0.0) or 0.0),
+                "actual_test_cagr_to_ulcer_mean": float(row.get("actual_test_cagr_to_ulcer_mean", 0.0) or 0.0),
+                "actual_test_r_squared_mean": float(row.get("actual_test_r_squared_mean", 0.0) or 0.0),
+                "actual_test_calmar_mean": float(row.get("actual_test_calmar_mean", 0.0) or 0.0),
+                "actual_test_beauty_mean": float(row.get("actual_test_beauty_mean", 0.0) or 0.0),
                 "actual_test_trades_mean": float(row.get("actual_test_trades_mean", 0.0) or 0.0),
                 "train_score_mean": float(row.get("train_score_mean", 0.0) or 0.0),
                 "train_net_mean": float(row.get("train_net_mean", 0.0) or 0.0),
+                "train_cagr_mean": float(row.get("train_cagr_mean", 0.0) or 0.0),
+                "train_cagr_to_ulcer_mean": float(row.get("train_cagr_to_ulcer_mean", 0.0) or 0.0),
+                "train_r_squared_mean": float(row.get("train_r_squared_mean", 0.0) or 0.0),
+                "train_calmar_mean": float(row.get("train_calmar_mean", 0.0) or 0.0),
+                "train_beauty_mean": float(row.get("train_beauty_mean", 0.0) or 0.0),
             }
         )
     return rows

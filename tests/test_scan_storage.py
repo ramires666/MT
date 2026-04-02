@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import polars as pl
@@ -67,10 +68,23 @@ def test_persist_johansen_scan_result_handles_mixed_failure_reason(tmp_path, mon
         normalized_group='indices',
         symbols=None,
         result=result,
+        unit_root_test_value='adf',
+        det_order=0,
+        k_ar_diff=1,
+        significance_level=0.05,
+        complete=False,
     )
 
     all_rows = pl.read_parquet(paths['all_pairs'])
     passed_rows = pl.read_parquet(paths['passed_pairs'])
+    summary_payload = json.loads(paths['summary'].read_text(encoding='utf-8'))
     assert all_rows.height == 2
     assert passed_rows.height == 1
     assert all_rows.get_column('failure_reason').to_list()[1] == 'unit_root_gate_failed'
+    assert summary_payload['complete'] is False
+    assert summary_payload['scan_config'] == {
+        'unit_root_test': 'adf',
+        'det_order': 0,
+        'k_ar_diff': 1,
+        'significance_level': 0.05,
+    }

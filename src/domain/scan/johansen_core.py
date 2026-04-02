@@ -13,7 +13,7 @@ from domain.scan.johansen_models import (
     JohansenScanParameters,
     JohansenUniverseScanRow,
 )
-from domain.scan.unit_root import screen_pair_for_cointegration
+from domain.scan.unit_root import PairUnitRootScreenResult, UnitRootScreenResult, screen_pair_for_cointegration
 
 
 def validate_det_order(det_order: int) -> None:
@@ -119,15 +119,23 @@ def sort_rows(rows: list[JohansenUniverseScanRow]) -> list[JohansenUniverseScanR
 
 
 def scan_pair_payload(
-    payload: tuple[str, str, np.ndarray, np.ndarray, UnitRootGate, JohansenScanParameters],
+    payload: tuple[str, str, np.ndarray, np.ndarray, UnitRootGate, JohansenScanParameters]
+    | tuple[str, str, np.ndarray, np.ndarray, UnitRootGate, JohansenScanParameters, UnitRootScreenResult, UnitRootScreenResult],
 ) -> JohansenUniverseScanRow:
-    symbol_1, symbol_2, leg_1_values, leg_2_values, unit_root_gate, params = payload
+    if len(payload) == 8:
+        symbol_1, symbol_2, leg_1_values, leg_2_values, unit_root_gate, params, precomputed_leg_1, precomputed_leg_2 = payload
+    else:
+        symbol_1, symbol_2, leg_1_values, leg_2_values, unit_root_gate, params = payload
+        precomputed_leg_1 = None
+        precomputed_leg_2 = None
     result = scan_pair_johansen_arrays(
         pair=PairSelection(symbol_1=symbol_1, symbol_2=symbol_2),
         leg_1_values=leg_1_values,
         leg_2_values=leg_2_values,
         unit_root_gate=unit_root_gate,
         params=params,
+        precomputed_leg_1=precomputed_leg_1,
+        precomputed_leg_2=precomputed_leg_2,
     )
     return build_scan_row(result)
 
@@ -138,6 +146,8 @@ def scan_pair_johansen_arrays(
     leg_2_values: np.ndarray | list[float],
     unit_root_gate: UnitRootGate,
     params: JohansenScanParameters,
+    precomputed_leg_1: UnitRootScreenResult | None = None,
+    precomputed_leg_2: UnitRootScreenResult | None = None,
 ) -> JohansenPairScanResult:
     validate_det_order(params.det_order)
     series_1, series_2, transformed_mode = prepare_series(
@@ -146,7 +156,14 @@ def scan_pair_johansen_arrays(
         use_log_prices=params.use_log_prices,
     )
     sample_size = int(min(series_1.size, series_2.size))
-    unit_root = screen_pair_for_cointegration(series_1, series_2, unit_root_gate)
+    if precomputed_leg_1 is not None and precomputed_leg_2 is not None:
+        unit_root = PairUnitRootScreenResult(
+            leg_1=precomputed_leg_1,
+            leg_2=precomputed_leg_2,
+            eligible_for_cointegration=bool(precomputed_leg_1.passes_gate and precomputed_leg_2.passes_gate),
+        )
+    else:
+        unit_root = screen_pair_for_cointegration(series_1, series_2, unit_root_gate)
 
     if sample_size < 32:
         return JohansenPairScanResult(

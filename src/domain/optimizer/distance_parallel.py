@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED, Future, wait
+from concurrent.futures import Executor, FIRST_COMPLETED, Future, wait
 from typing import Any, Callable, Mapping, Sequence
 
 import polars as pl
 
 from domain.contracts import PairSelection, StrategyDefaults
 from domain.optimizer.distance_models import CandidateTask, CancellationCheck, DistanceOptimizationRow, DistanceTask, ProgressCallback
-from workers.executor import build_process_pool
+from workers.executor import build_process_pool, shutdown_executor
 
 
 EvaluateParamsFn = Callable[..., DistanceOptimizationRow]
@@ -51,12 +51,14 @@ def _collect_parallel_results(
     progress_total: int = 0,
     progress_stage: str = "",
     completed_offset: int = 0,
+    executor: Executor | None = None,
 ) -> tuple[list[Any], bool]:
     if not chunks:
         emit_progress(progress_callback, completed_offset, progress_total, progress_stage)
         return [], False
 
-    executor = build_process_pool(max_workers=worker_count)
+    owned_executor = executor is None
+    executor = executor or build_process_pool(max_workers=worker_count)
     cancelled = False
     results: list[Any] = []
     completed = completed_offset
@@ -91,7 +93,15 @@ def _collect_parallel_results(
                 emit_progress(progress_callback, completed, progress_total, progress_stage)
             submit_available()
     finally:
-        executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
+        if cancelled:
+            shutdown_executor(
+                executor,
+                wait=False,
+                cancel_futures=True,
+                force_kill=True,
+            )
+        elif owned_executor:
+            shutdown_executor(executor)
 
     return results, cancelled
 
@@ -218,6 +228,7 @@ def evaluate_distance_tasks(
     prepare_context_fn: PrepareContextFn | None = None,
     progress_callback: ProgressCallback | None = None,
     progress_stage: str = "Grid search",
+    executor: Executor | None = None,
 ) -> tuple[list[DistanceOptimizationRow], bool]:
     worker_count = resolve_worker_count(parallel_workers, len(tasks))
     total_tasks = len(tasks)
@@ -292,6 +303,7 @@ def evaluate_distance_tasks(
         progress_callback=progress_callback,
         progress_total=total_tasks,
         progress_stage=progress_stage,
+        executor=executor,
     )
 
 
@@ -316,6 +328,7 @@ def evaluate_candidate_distance_tasks(
     progress_total: int = 0,
     progress_stage: str = "Genetic search",
     completed_offset: int = 0,
+    executor: Executor | None = None,
 ) -> tuple[list[tuple[Any, DistanceOptimizationRow]], bool]:
     worker_count = resolve_worker_count(parallel_workers, len(tasks))
     if worker_count <= 1:
@@ -393,4 +406,5 @@ def evaluate_candidate_distance_tasks(
         progress_total=progress_total,
         progress_stage=progress_stage,
         completed_offset=completed_offset,
+        executor=executor,
     )
