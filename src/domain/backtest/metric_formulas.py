@@ -80,6 +80,35 @@ def compute_r_squared(equity: np.ndarray) -> float:
     return max(0.0, min(1.0, float(r_squared)))
 
 
+def compute_hurst_exponent(values: np.ndarray) -> float:
+    series = np.asarray(values, dtype=np.float64)
+    if series.size < 32:
+        return 0.0
+    finite = series[np.isfinite(series)]
+    if finite.size < 32:
+        return 0.0
+    clipped = np.maximum(finite, 1e-9)
+    transformed = np.log(clipped)
+    max_lag = min(64, max(8, transformed.size // 2))
+    lag_values: list[float] = []
+    tau_values: list[float] = []
+    for lag in range(2, max_lag + 1):
+        diff = transformed[lag:] - transformed[:-lag]
+        if diff.size < 2:
+            continue
+        tau = float(np.std(diff, ddof=0))
+        if not np.isfinite(tau) or tau <= 1e-12:
+            continue
+        lag_values.append(float(lag))
+        tau_values.append(tau)
+    if len(lag_values) < 2:
+        return 0.0
+    slope, _intercept = np.polyfit(np.log(lag_values), np.log(tau_values), 1)
+    if not np.isfinite(slope):
+        return 0.0
+    return max(0.0, min(1.0, float(slope)))
+
+
 def duration_years_from_times(times: Sequence[object]) -> float:
     if len(times) < 2:
         return 0.0
@@ -128,14 +157,13 @@ def compute_equity_curve_metrics(
             "pnl_to_maxdd": 0.0,
             "omega_ratio": 0.0,
             "k_ratio": 0.0,
-            "score_log_trades": 0.0,
             "ulcer_index": 0.0,
             "ulcer_performance": 0.0,
             "cagr": 0.0,
             "cagr_to_ulcer": 0.0,
             "r_squared": 0.0,
+            "hurst_exponent": 0.0,
             "calmar": 0.0,
-            "beauty_score": 0.0,
             "gross_profit": 0.0,
             "spread_cost": 0.0,
             "slippage_cost": 0.0,
@@ -154,7 +182,6 @@ def compute_equity_curve_metrics(
     gains = float(np.clip(pnl_steps, 0.0, None).sum())
     losses = float(np.clip(-pnl_steps, 0.0, None).sum())
     omega_ratio = gains if losses <= 1e-12 else gains / losses
-    score_log_trades = pnl_to_maxdd * np.log(1.0 + max(0, trades_count))
 
     dd_pct = np.divide(drawdown_abs, running_peak, out=np.zeros_like(drawdown_abs), where=running_peak > 1e-12)
     max_drawdown_pct = float(dd_pct.max()) if dd_pct.size else 0.0
@@ -163,8 +190,8 @@ def compute_equity_curve_metrics(
     cagr = compute_cagr(float(initial_capital), ending_equity, duration_years)
     cagr_to_ulcer = safe_ratio(cagr, ulcer_index)
     r_squared = compute_r_squared(equity_total)
+    hurst_exponent = compute_hurst_exponent(equity_total)
     calmar = safe_ratio(cagr, max_drawdown_pct)
-    beauty_score = safe_ratio(clamp_metric_value(cagr * r_squared), ulcer_index)
     total_cost = spread_cost + slippage_cost + commission_cost
 
     return {
@@ -174,14 +201,13 @@ def compute_equity_curve_metrics(
         "pnl_to_maxdd": pnl_to_maxdd,
         "omega_ratio": float(omega_ratio),
         "k_ratio": compute_k_ratio(equity_total),
-        "score_log_trades": float(score_log_trades),
         "ulcer_index": ulcer_index,
         "ulcer_performance": safe_ratio(net_profit, ulcer_index),
         "cagr": cagr,
         "cagr_to_ulcer": cagr_to_ulcer,
         "r_squared": r_squared,
+        "hurst_exponent": hurst_exponent,
         "calmar": calmar,
-        "beauty_score": beauty_score,
         "gross_profit": float(gross_profit),
         "spread_cost": float(spread_cost),
         "slippage_cost": float(slippage_cost),

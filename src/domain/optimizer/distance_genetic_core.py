@@ -122,6 +122,7 @@ def evaluate_candidates_into_cache(
     progress_stage: str = "Genetic search",
     progress_total: int = 0,
     executor: Executor | None = None,
+    evaluate_params_fn=None,
 ) -> tuple[int, bool]:
     task_items = []
     task_signatures: dict[Candidate, tuple[int, float, float, float | None]] = {}
@@ -174,6 +175,7 @@ def evaluate_candidates_into_cache(
         progress_stage=progress_stage,
         completed_offset=len(cache),
         executor=executor,
+        evaluate_params_fn=evaluate_params_fn,
     )
     rows_by_signature: dict[tuple[int, float, float, float | None], DistanceOptimizationRow] = {}
     for candidate, row in results:

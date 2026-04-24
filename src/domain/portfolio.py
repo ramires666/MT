@@ -26,8 +26,8 @@ class PortfolioRunRow:
     cagr: float | None
     cagr_to_ulcer: float | None
     r_squared: float | None
+    hurst_exponent: float | None
     calmar: float | None
-    beauty_score: float | None
     status: str
 
 
@@ -56,8 +56,8 @@ class PortfolioEquitySummary:
     cagr: float
     cagr_to_ulcer: float
     r_squared: float
+    hurst_exponent: float
     calmar: float
-    beauty_score: float
     max_unrealized_drawdown: float
     avg_unrealized_drawdown: float
     max_capital_load: float
@@ -479,8 +479,8 @@ def summarize_portfolio_equity_series(
         cagr=float(metrics.get("cagr", 0.0) or 0.0),
         cagr_to_ulcer=float(metrics.get("cagr_to_ulcer", 0.0) or 0.0),
         r_squared=float(metrics.get("r_squared", 0.0) or 0.0),
+        hurst_exponent=float(metrics.get("hurst_exponent", 0.0) or 0.0),
         calmar=float(metrics.get("calmar", 0.0) or 0.0),
-        beauty_score=float(metrics.get("beauty_score", 0.0) or 0.0),
         max_unrealized_drawdown=float(negative_unrealized.max()) if negative_unrealized.size else 0.0,
         avg_unrealized_drawdown=float(negative_unrealized.mean()) if negative_unrealized.size else 0.0,
         max_capital_load=float(active_loads.max()) if active_loads.size else 0.0,

@@ -24,7 +24,7 @@ from domain.backtest.distance_pricing import (
     price_to_account_pnl,
     price_with_costs,
 )
-from domain.contracts import PairSelection, StrategyDefaults, Timeframe
+from domain.contracts import Algorithm, PairSelection, StrategyDefaults, Timeframe
 from domain.data.io import load_instrument_spec, load_quotes_range
 
 
@@ -48,6 +48,7 @@ def load_pair_frame(
 
 @dataclass(slots=True)
 class _DistanceSignalState:
+    spread: np.ndarray
     spread_mean: np.ndarray
     spread_std: np.ndarray
     zscore: np.ndarray
@@ -69,7 +70,7 @@ class _DistanceBacktestContext:
     leg_spec_1: _LegSpec
     leg_spec_2: _LegSpec
     exposure_per_leg: float
-    signal_cache: dict[int, _DistanceSignalState] = field(default_factory=dict)
+    signal_cache: dict[tuple[str, int], _DistanceSignalState] = field(default_factory=dict)
 
 
 def _column_or_zeros(frame: pl.DataFrame, name: str) -> np.ndarray:
@@ -111,25 +112,58 @@ def prepare_distance_backtest_context(
     )
 
 
-def _signal_state(context: _DistanceBacktestContext, lookback: int) -> _DistanceSignalState:
-    cached = context.signal_cache.get(int(lookback))
+def _normalize_algorithm_name(algorithm: str | Algorithm | None) -> str:
+    raw_value = getattr(algorithm, "value", algorithm)
+    normalized = str(raw_value or Algorithm.DISTANCE.value).strip().lower()
+    if normalized not in {Algorithm.DISTANCE.value, Algorithm.OLS.value}:
+        raise ValueError(f"Unsupported backtest algorithm: {normalized}")
+    return normalized
+
+
+def _ols_spread(context: _DistanceBacktestContext, lookback: int) -> np.ndarray:
+    fit_window = max(2, min(int(lookback), context.close_1.shape[0]))
+    x = context.close_2[:fit_window]
+    y = context.close_1[:fit_window]
+    x_mean = float(np.mean(x))
+    y_mean = float(np.mean(y))
+    x_centered = x - x_mean
+    denominator = float(np.dot(x_centered, x_centered))
+    if denominator <= 1e-12:
+        beta = (y_mean / x_mean) if abs(x_mean) > 1e-12 else 1.0
+    else:
+        beta = float(np.dot(x_centered, y - y_mean) / denominator)
+    alpha = y_mean - (beta * x_mean)
+    return context.close_1 - (alpha + (beta * context.close_2))
+
+
+def _signal_state(
+    context: _DistanceBacktestContext,
+    lookback: int,
+    *,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
+) -> _DistanceSignalState:
+    algorithm_name = _normalize_algorithm_name(algorithm)
+    cache_key = (algorithm_name, int(lookback))
+    cached = context.signal_cache.get(cache_key)
     if cached is not None:
         return cached
-    spread_mean, spread_std = rolling_mean_std(context.spread, int(lookback))
+    spread = context.spread if algorithm_name == Algorithm.DISTANCE.value else _ols_spread(context, lookback)
+    spread_mean, spread_std = rolling_mean_std(spread, int(lookback))
     zscore = np.full(context.spread.shape[0], np.nan, dtype=np.float64)
     valid_spread_mask = spread_std > 0
     zscore[valid_spread_mask] = (
-        context.spread[valid_spread_mask] - spread_mean[valid_spread_mask]
+        spread[valid_spread_mask] - spread_mean[valid_spread_mask]
     ) / spread_std[valid_spread_mask]
     z_mean, z_std = rolling_mean_std(np.nan_to_num(zscore, nan=0.0), int(lookback))
     cached = _DistanceSignalState(
+        spread=spread,
         spread_mean=spread_mean,
         spread_std=spread_std,
         zscore=zscore,
         z_mean=z_mean,
         z_std=z_std,
     )
-    context.signal_cache[int(lookback)] = cached
+    context.signal_cache[cache_key] = cached
     return cached
 
 
@@ -210,14 +244,13 @@ def _empty_metrics(defaults: StrategyDefaults) -> dict[str, float | int]:
         "pnl_to_maxdd": 0.0,
         "omega_ratio": 0.0,
         "k_ratio": 0.0,
-        "score_log_trades": 0.0,
         "ulcer_index": 0.0,
         "ulcer_performance": 0.0,
         "cagr": 0.0,
         "cagr_to_ulcer": 0.0,
         "r_squared": 0.0,
+        "hurst_exponent": 0.0,
         "calmar": 0.0,
-        "beauty_score": 0.0,
         "gross_profit": 0.0,
         "spread_cost": 0.0,
         "slippage_cost": 0.0,
@@ -269,6 +302,7 @@ def run_distance_backtest_metrics_frame(
     spec_1: Mapping[str, Any] | None = None,
     spec_2: Mapping[str, Any] | None = None,
     context: _DistanceBacktestContext | None = None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> dict[str, float | int]:
     if frame.is_empty():
         return _empty_metrics(defaults)
@@ -284,7 +318,7 @@ def run_distance_backtest_metrics_frame(
         spec_1=spec_1,
         spec_2=spec_2,
     )
-    state = _signal_state(context, params.lookback_bars)
+    state = _signal_state(context, params.lookback_bars, algorithm=algorithm)
     defaults_local = context.defaults
     close_1 = context.close_1
     close_2 = context.close_2
@@ -450,6 +484,7 @@ def run_distance_backtest_frame(
     contract_size_2: float,
     spec_1: Mapping[str, Any] | None = None,
     spec_2: Mapping[str, Any] | None = None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> DistanceBacktestResult:
     if frame.is_empty():
         return _empty_result(pair)
@@ -465,7 +500,7 @@ def run_distance_backtest_frame(
         spec_1=spec_1,
         spec_2=spec_2,
     )
-    state = _signal_state(context, params.lookback_bars)
+    state = _signal_state(context, params.lookback_bars, algorithm=algorithm)
     leg_spec_1 = context.leg_spec_1
     leg_spec_2 = context.leg_spec_2
     times = context.times
@@ -475,7 +510,7 @@ def run_distance_backtest_frame(
     close_2 = context.close_2
     spread_points_1 = context.spread_points_1
     spread_points_2 = context.spread_points_2
-    spread = context.spread
+    spread = state.spread
     spread_mean = state.spread_mean
     zscore = state.zscore
     z_mean = state.z_mean
@@ -671,6 +706,7 @@ def run_distance_backtest(
     ended_at,
     defaults: StrategyDefaults,
     params: DistanceParameters,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> DistanceBacktestResult:
     frame = load_pair_frame(broker=broker, pair=pair, timeframe=timeframe, started_at=started_at, ended_at=ended_at)
     if frame.is_empty():
@@ -689,4 +725,5 @@ def run_distance_backtest(
         contract_size_2=float(spec_2.get("contract_size", 1.0) or 1.0),
         spec_1=spec_1,
         spec_2=spec_2,
+        algorithm=algorithm,
     )

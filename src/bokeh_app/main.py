@@ -78,7 +78,9 @@ from bokeh_app.zscore_diagnostics import (
     empty_zscore_metric_source,
 )
 from domain.backtest.distance import DistanceParameters, load_pair_frame, run_distance_backtest
+from domain.backtest.ols import run_ols_backtest
 from domain.contracts import (
+    Algorithm,
     OptimizationMode,
     PairSelection,
     ScanUniverseMode,
@@ -104,7 +106,15 @@ from domain.data.catalog_groups import (
     list_mt5_group_options,
 )
 from domain.data.io import load_instrument_catalog_frame
-from domain.optimizer import DistanceOptimizationResult, OBJECTIVE_METRICS, count_distance_parameter_grid, optimize_distance_genetic, optimize_distance_grid
+from domain.optimizer import (
+    DistanceOptimizationResult,
+    OBJECTIVE_METRICS,
+    count_distance_parameter_grid,
+    optimize_distance_genetic,
+    optimize_distance_grid,
+    optimize_ols_genetic,
+    optimize_ols_grid,
+)
 from domain.scan import OptimizerGridScanResult, combine_optimizer_grid_scan_results, resolve_scan_symbols, scan_universe_optimizer_grid
 from domain.scan.johansen import JohansenScanParameters, JohansenUniverseScanResult, scan_universe_johansen
 from domain.wfa import run_distance_genetic_wfa
@@ -169,7 +179,7 @@ DOWNLOAD_POLICY_OPTIONS = ["missing_only", "force"]
 WFA_UNIT_OPTIONS = [item.value for item in WfaWindowUnit]
 PORTFOLIO_ALLOCATION_OPTIONS = ["equal_weight", "diversified_risk"]
 SUPPORTED_META_MODELS = ("decision_tree", "random_forest", "xgboost")
-DEFAULT_META_TARGET = "test_score_log_trades"
+DEFAULT_META_TARGET = "test_objective_score"
 DEFAULT_MT5_TERMINAL_PATH = r"C:\Program Files\Bybit MT5 Terminal\terminal64.exe"
 SymbolSelectOption = str | tuple[str, str]
 
@@ -278,8 +288,8 @@ def _format_portfolio_metrics_line(summary: PortfolioEquitySummary | None, *, la
         f"CAGR: <b>{float(summary.cagr):.4f}</b> | "
         f"C/U: <b>{float(summary.cagr_to_ulcer):.4f}</b> | "
         f"R^2: <b>{float(summary.r_squared):.4f}</b> | "
+        f"Hurst: <b>{float(summary.hurst_exponent):.4f}</b> | "
         f"Calmar: <b>{float(summary.calmar):.4f}</b> | "
-        f"Beauty: <b>{float(summary.beauty_score):.4f}</b> | "
         f"Unreal DD max/avg: <b>{float(summary.max_unrealized_drawdown):.2f} / {float(summary.avg_unrealized_drawdown):.2f}</b> | "
         f"Load max/avg: <b>{float(summary.max_capital_load):.2f} ({float(summary.max_capital_load_pct) * 100.0:.1f}%) / "
         f"{float(summary.avg_capital_load):.2f} ({float(summary.avg_capital_load_pct) * 100.0:.1f}%)</b> | "
@@ -408,6 +418,10 @@ def build_document() -> None:
     suppress_optimization_config_change = False
     suppress_shared_range_change = False
     suppress_portfolio_range_change = False
+    debounced_callback_handles: dict[str, object | None] = {
+        "optimization_config": None,
+        "display_settings": None,
+    }
     suppress_symbol_change_refresh = 0
     suppress_symbol_filter_sync = 0
     suppress_scan_selection = False
@@ -494,7 +508,7 @@ def build_document() -> None:
         end=_ui_datetime(now_utc),
         value=(_ui_datetime(history_start), _ui_datetime(now_utc)),
     )
-    algorithm_select = Select(title="Algorithm", value="distance", options=["distance", "johansen", "copula"])
+    algorithm_select = Select(title="Algorithm", value=Algorithm.DISTANCE.value, options=[Algorithm.DISTANCE.value, Algorithm.OLS.value, Algorithm.JOHANSEN.value, Algorithm.COPULA.value])
     capital_input = Spinner(title="Initial Capital", low=100.0, step=100.0, value=10_000.0)
     leverage_input = Spinner(title="Leverage", low=1.0, step=1.0, value=100.0)
     margin_budget_input = Spinner(title="Margin Budget / Leg", low=10.0, step=10.0, value=500.0)
@@ -869,12 +883,11 @@ def build_document() -> None:
             TableColumn(field="lookback_bars", title="Lookback", formatter=NumberFormatter(format="0"), width=82),
             TableColumn(field="omega_ratio", title="Omega", formatter=NumberFormatter(format="0.000"), width=78),
             TableColumn(field="k_ratio", title="K", formatter=NumberFormatter(format="0.000"), width=70),
-            TableColumn(field="score_log_trades", title="Score", formatter=NumberFormatter(format="0.000"), width=84),
             TableColumn(field="cagr", title="CAGR", formatter=NumberFormatter(format="0.0000"), width=82),
             TableColumn(field="cagr_to_ulcer", title="CAGR/Ulcer", formatter=NumberFormatter(format="0.0000"), width=96),
             TableColumn(field="r_squared", title="R^2", formatter=NumberFormatter(format="0.0000"), width=74),
+            TableColumn(field="hurst_exponent", title="Hurst", formatter=NumberFormatter(format="0.0000"), width=80),
             TableColumn(field="calmar", title="Calmar", formatter=NumberFormatter(format="0.0000"), width=82),
-            TableColumn(field="beauty_score", title="Beauty", formatter=NumberFormatter(format="0.0000"), width=84),
             TableColumn(field="ending_equity", title="Ending", formatter=NumberFormatter(format="0.00"), width=90),
             TableColumn(field="pnl_to_maxdd", title="PnL/DD", formatter=NumberFormatter(format="0.000"), width=82),
             TableColumn(field="ulcer_index", title="Ulcer", formatter=NumberFormatter(format="0.0000"), width=82),
@@ -1112,6 +1125,7 @@ def build_document() -> None:
     def _optimization_export_metadata() -> list[tuple[str, object]]:
         defaults = build_defaults()
         metadata: list[tuple[str, object]] = [
+            ("Algorithm", algorithm_select.value),
             ("Mode", optimization_mode_select.value),
             ("Objective", optimization_objective_select.value),
             ("Range Mode", optimization_range_mode_select.value),
@@ -1361,6 +1375,7 @@ def build_document() -> None:
             "stop_z_label": [],
             "bollinger_k": [],
             "train_score": [],
+            "train_hurst_exponent": [],
             "train_net_profit": [],
             "train_max_drawdown": [],
             "train_trades": [],
@@ -1371,8 +1386,8 @@ def build_document() -> None:
             "test_cagr": [],
             "test_cagr_to_ulcer": [],
             "test_r_squared": [],
+            "test_hurst_exponent": [],
             "test_calmar": [],
-            "test_beauty_score": [],
             "test_trades": [],
             "test_commission": [],
             "test_total_cost": [],
@@ -1394,6 +1409,7 @@ def build_document() -> None:
             table["stop_z_label"].append("disabled" if raw_stop in (None, "") else f"{float(raw_stop):.2f}")
             table["bollinger_k"].append(float(row.get("bollinger_k", 0.0) or 0.0))
             table["train_score"].append(float(row.get("train_score", 0.0) or 0.0))
+            table["train_hurst_exponent"].append(float(row.get("train_hurst_exponent", 0.0) or 0.0))
             table["train_net_profit"].append(float(row.get("train_net_profit", 0.0) or 0.0))
             table["train_max_drawdown"].append(float(row.get("train_max_drawdown", 0.0) or 0.0))
             table["train_trades"].append(int(row.get("train_trades", 0) or 0))
@@ -1404,8 +1420,8 @@ def build_document() -> None:
             table["test_cagr"].append(float(row.get("test_cagr", 0.0) or 0.0))
             table["test_cagr_to_ulcer"].append(float(row.get("test_cagr_to_ulcer", 0.0) or 0.0))
             table["test_r_squared"].append(float(row.get("test_r_squared", 0.0) or 0.0))
+            table["test_hurst_exponent"].append(float(row.get("test_hurst_exponent", 0.0) or 0.0))
             table["test_calmar"].append(float(row.get("test_calmar", 0.0) or 0.0))
-            table["test_beauty_score"].append(float(row.get("test_beauty_score", 0.0) or 0.0))
             table["test_trades"].append(int(row.get("test_trades", 0) or 0))
             table["test_commission"].append(float(row.get("test_commission", 0.0) or 0.0))
             table["test_total_cost"].append(float(row.get("test_total_cost", 0.0) or 0.0))
@@ -1422,7 +1438,13 @@ def build_document() -> None:
         value=(_ui_datetime(history_start), _ui_datetime(now_utc)),
         sizing_mode="stretch_width",
     )
-    wfa_objective_select = Select(title="Objective", value="score_log_trades", options=OBJECTIVE_OPTIONS, width=150)
+    wfa_algorithm_select = Select(
+        title="Algorithm",
+        value=Algorithm.DISTANCE.value,
+        options=[Algorithm.DISTANCE.value, Algorithm.OLS.value],
+        width=120,
+    )
+    wfa_objective_select = Select(title="Objective", value=OBJECTIVE_OPTIONS[0], options=OBJECTIVE_OPTIONS, width=150)
     wfa_unit_select = Select(title="Unit", value=WfaWindowUnit.WEEKS.value, options=WFA_UNIT_OPTIONS, width=96)
     wfa_lookback_input = Spinner(title="Lookback", low=1, step=1, value=8, width=92)
     wfa_test_input = Spinner(title="Test", low=1, step=1, value=2, width=92)
@@ -1434,7 +1456,7 @@ def build_document() -> None:
         width=96,
     )
     wfa_run_button = Button(label="Run WFA", button_type="primary", width=120)
-    wfa_status_div = Div(text="<p>Ready to run rolling WFA on the selected tester pair using genetic optimization and the selected objective.</p>")
+    wfa_status_div = Div(text="<p>Ready to run rolling WFA on the selected tester pair using genetic optimization, the selected algorithm and the selected objective.</p>")
     wfa_table_source = ColumnDataSource(empty_wfa_table_data())
     wfa_equity_source = ColumnDataSource({"time": [], "equity": []})
     wfa_equity_plot = figure(
@@ -1481,15 +1503,15 @@ def build_document() -> None:
             TableColumn(field="entry_z", title="Entry", formatter=NumberFormatter(format="0.00"), width=64),
             TableColumn(field="exit_z", title="Exit", formatter=NumberFormatter(format="0.00"), width=64),
             TableColumn(field="stop_z_label", title="Stop", width=70),
-            TableColumn(field="bollinger_k", title="Boll", formatter=NumberFormatter(format="0.00"), width=64),
             TableColumn(field="train_score", title="Train Score", formatter=NumberFormatter(format="0.000"), width=90),
+            TableColumn(field="train_hurst_exponent", title="Train Hurst", formatter=NumberFormatter(format="0.0000"), width=96),
             TableColumn(field="test_score", title="Test Score", formatter=NumberFormatter(format="0.000"), width=86),
             TableColumn(field="test_net_profit", title="Test Net", formatter=NumberFormatter(format="0.00"), width=84),
             TableColumn(field="test_cagr", title="Test CAGR", formatter=NumberFormatter(format="0.0000"), width=88),
             TableColumn(field="test_cagr_to_ulcer", title="Test C/U", formatter=NumberFormatter(format="0.0000"), width=88),
             TableColumn(field="test_r_squared", title="Test R^2", formatter=NumberFormatter(format="0.0000"), width=84),
+            TableColumn(field="test_hurst_exponent", title="Test Hurst", formatter=NumberFormatter(format="0.0000"), width=92),
             TableColumn(field="test_calmar", title="Test Calmar", formatter=NumberFormatter(format="0.0000"), width=92),
-            TableColumn(field="test_beauty_score", title="Test Beauty", formatter=NumberFormatter(format="0.0000"), width=92),
             TableColumn(field="test_max_drawdown", title="Test DD", formatter=NumberFormatter(format="0.00"), width=82),
             TableColumn(field="test_trades", title="Trades", formatter=NumberFormatter(format="0"), width=68),
             TableColumn(field="test_commission", title="Comm", formatter=NumberFormatter(format="0.00"), width=78),
@@ -1503,6 +1525,7 @@ def build_document() -> None:
     )
     wfa_controls = column(
         row(
+            wfa_algorithm_select,
             wfa_objective_select,
             wfa_unit_select,
             wfa_lookback_input,
@@ -1521,6 +1544,7 @@ def build_document() -> None:
         defaults = build_defaults()
         return [
             ("WFA Period", _format_export_period(wfa_period_slider.value[0], wfa_period_slider.value[1])),
+            ("Algorithm", wfa_algorithm_select.value),
             ("Objective", wfa_objective_select.value),
             ("Unit", wfa_unit_select.value),
             ("Lookback Windows", wfa_lookback_input.value),
@@ -1565,8 +1589,8 @@ def build_document() -> None:
             "test_cagr": [],
             "test_cagr_to_ulcer": [],
             "test_r_squared": [],
+            "test_hurst_exponent": [],
             "test_calmar": [],
-            "test_beauty_score": [],
             "test_trades": [],
             "test_commission": [],
             "test_total_cost": [],
@@ -1592,8 +1616,8 @@ def build_document() -> None:
             "actual_test_cagr_mean": [],
             "actual_test_cagr_to_ulcer_mean": [],
             "actual_test_r_squared_mean": [],
+            "actual_test_hurst_mean": [],
             "actual_test_calmar_mean": [],
-            "actual_test_beauty_mean": [],
             "actual_test_trades_mean": [],
             "train_score_mean": [],
             "train_net_mean": [],
@@ -1640,7 +1664,7 @@ def build_document() -> None:
     meta_model_select = Select(title="Model", value=default_meta_model(), options=list(SUPPORTED_META_MODELS), width=140)
     meta_objective_select = Select(
         title="Objective",
-        value=str(wfa_objective_select.value or "score_log_trades"),
+        value=str(wfa_objective_select.value or OBJECTIVE_OPTIONS[0]),
         options=OBJECTIVE_OPTIONS,
         width=150,
     )
@@ -1703,8 +1727,8 @@ def build_document() -> None:
             TableColumn(field="actual_test_cagr_mean", title="Test CAGR", formatter=NumberFormatter(format="0.0000"), width=92),
             TableColumn(field="actual_test_cagr_to_ulcer_mean", title="Test C/U", formatter=NumberFormatter(format="0.0000"), width=90),
             TableColumn(field="actual_test_r_squared_mean", title="Test R^2", formatter=NumberFormatter(format="0.0000"), width=86),
+            TableColumn(field="actual_test_hurst_mean", title="Test Hurst", formatter=NumberFormatter(format="0.0000"), width=92),
             TableColumn(field="actual_test_calmar_mean", title="Test Calmar", formatter=NumberFormatter(format="0.0000"), width=94),
-            TableColumn(field="actual_test_beauty_mean", title="Test Beauty", formatter=NumberFormatter(format="0.0000"), width=94),
             TableColumn(field="actual_test_trades_mean", title="Trades", formatter=NumberFormatter(format="0.0"), width=74),
             TableColumn(field="train_score_mean", title="Train Score", formatter=NumberFormatter(format="0.000"), width=92),
             TableColumn(field="train_net_mean", title="Train Net", formatter=NumberFormatter(format="0.00"), width=88),
@@ -1736,8 +1760,8 @@ def build_document() -> None:
             TableColumn(field="test_cagr", title="CAGR", formatter=NumberFormatter(format="0.0000"), width=86),
             TableColumn(field="test_cagr_to_ulcer", title="C/U", formatter=NumberFormatter(format="0.0000"), width=84),
             TableColumn(field="test_r_squared", title="R^2", formatter=NumberFormatter(format="0.0000"), width=80),
+            TableColumn(field="test_hurst_exponent", title="Hurst", formatter=NumberFormatter(format="0.0000"), width=82),
             TableColumn(field="test_calmar", title="Calmar", formatter=NumberFormatter(format="0.0000"), width=88),
-            TableColumn(field="test_beauty_score", title="Beauty", formatter=NumberFormatter(format="0.0000"), width=88),
             TableColumn(field="test_trades", title="Trades", formatter=NumberFormatter(format="0"), width=68),
             TableColumn(field="lookback_bars", title="Lookback", formatter=NumberFormatter(format="0"), width=82),
             TableColumn(field="entry_z", title="Entry", formatter=NumberFormatter(format="0.00"), width=68),
@@ -1857,8 +1881,8 @@ def build_document() -> None:
             "cagr": [],
             "cagr_to_ulcer": [],
             "r_squared": [],
+            "hurst_exponent": [],
             "calmar": [],
-            "beauty_score": [],
             "run_status": [],
         }
 
@@ -1905,8 +1929,8 @@ def build_document() -> None:
             rows["cagr"].append(None if run_row is None or run_row.cagr is None else float(run_row.cagr))
             rows["cagr_to_ulcer"].append(None if run_row is None or run_row.cagr_to_ulcer is None else float(run_row.cagr_to_ulcer))
             rows["r_squared"].append(None if run_row is None or run_row.r_squared is None else float(run_row.r_squared))
+            rows["hurst_exponent"].append(None if run_row is None or run_row.hurst_exponent is None else float(run_row.hurst_exponent))
             rows["calmar"].append(None if run_row is None or run_row.calmar is None else float(run_row.calmar))
-            rows["beauty_score"].append(None if run_row is None or run_row.beauty_score is None else float(run_row.beauty_score))
             rows["run_status"].append("" if run_row is None else run_row.status)
         return rows
 
@@ -2050,8 +2074,8 @@ def build_document() -> None:
             TableColumn(field="cagr", title="CAGR", formatter=NumberFormatter(format="0.0000"), width=84),
             TableColumn(field="cagr_to_ulcer", title="C/U", formatter=NumberFormatter(format="0.0000"), width=84),
             TableColumn(field="r_squared", title="R^2", formatter=NumberFormatter(format="0.0000"), width=78),
+            TableColumn(field="hurst_exponent", title="Hurst", formatter=NumberFormatter(format="0.0000"), width=82),
             TableColumn(field="calmar", title="Calmar", formatter=NumberFormatter(format="0.0000"), width=86),
-            TableColumn(field="beauty_score", title="Beauty", formatter=NumberFormatter(format="0.0000"), width=86),
             TableColumn(field="run_status", title="Run", width=92),
         ],
         sizing_mode="stretch_width",
@@ -2322,6 +2346,7 @@ if (!attach()) {
         BrowserStateBinding("plot_height_three", plot_height_three_input),
         BrowserStateBinding("plot_height_four", plot_height_four_input),
         BrowserStateBinding("wfa_period", wfa_period_slider, kind="range"),
+        BrowserStateBinding("wfa_algorithm", wfa_algorithm_select, kind="select"),
         BrowserStateBinding("wfa_objective", wfa_objective_select, kind="select"),
         BrowserStateBinding("wfa_unit", wfa_unit_select, kind="select"),
         BrowserStateBinding("wfa_lookback", wfa_lookback_input),
@@ -2828,8 +2853,9 @@ if (!attach()) {
         period_override: tuple[datetime, datetime] | None = None,
         pair_override: PairSelection | None = None,
     ) -> tuple[dict[str, object] | None, str | None]:
-        if algorithm_select.value != "distance":
-            return None, "<p>Only the first Distance tester slice is wired right now.</p>"
+        algorithm_value = str(algorithm_select.value or Algorithm.DISTANCE.value)
+        if algorithm_value not in {Algorithm.DISTANCE.value, Algorithm.OLS.value}:
+            return None, "<p>Only Distance and OLS tester slices are wired right now.</p>"
 
         pair = pair_override if isinstance(pair_override, PairSelection) else current_pair()
         if pair is None:
@@ -2844,6 +2870,7 @@ if (!attach()) {
         return (
             {
                 "pair": pair,
+                "algorithm": Algorithm(algorithm_value),
                 "timeframe": Timeframe(timeframe_select.value),
                 "started_at": started_at,
                 "ended_at": ended_at,
@@ -2855,6 +2882,7 @@ if (!attach()) {
 
     def run_tester_job(request: dict[str, object]) -> dict[str, object]:
         pair = request["pair"]
+        algorithm = request["algorithm"]
         timeframe = request["timeframe"]
         started_at = request["started_at"]
         ended_at = request["ended_at"]
@@ -2862,6 +2890,7 @@ if (!attach()) {
         defaults = request["defaults"]
         params = request["params"]
         assert isinstance(pair, PairSelection)
+        assert isinstance(algorithm, Algorithm)
         assert isinstance(timeframe, Timeframe)
         assert isinstance(started_at, datetime)
         assert isinstance(ended_at, datetime)
@@ -2879,15 +2908,28 @@ if (!attach()) {
             strategy_started_at = activation_started_at
             padded_display = True
 
-        result = run_distance_backtest(
-            broker=broker,
-            pair=pair,
-            timeframe=timeframe,
-            started_at=strategy_started_at,
-            ended_at=ended_at,
-            defaults=defaults,
-            params=params,
-        )
+        if algorithm == Algorithm.DISTANCE:
+            result = run_distance_backtest(
+                broker=broker,
+                pair=pair,
+                timeframe=timeframe,
+                started_at=strategy_started_at,
+                ended_at=ended_at,
+                defaults=defaults,
+                params=params,
+            )
+        elif algorithm == Algorithm.OLS:
+            result = run_ols_backtest(
+                broker=broker,
+                pair=pair,
+                timeframe=timeframe,
+                started_at=strategy_started_at,
+                ended_at=ended_at,
+                defaults=defaults,
+                params=params,
+            )
+        else:
+            raise ValueError(f"Unsupported tester algorithm: {algorithm.value}")
         if result.frame.is_empty():
             return {
                 "status": "empty",
@@ -4125,6 +4167,7 @@ if (!targets.length) {
     def optimization_signature(
         *,
         pair: PairSelection,
+        algorithm: Algorithm,
         timeframe: Timeframe,
         started_at: datetime,
         ended_at: datetime,
@@ -4138,6 +4181,7 @@ if (!targets.length) {
         return {
             "symbol_1": pair.symbol_1,
             "symbol_2": pair.symbol_2,
+            "algorithm": algorithm.value,
             "timeframe": timeframe.value,
             "started_at": serialize_time(started_at),
             "ended_at": serialize_time(ended_at),
@@ -4234,10 +4278,12 @@ if (!targets.length) {
             clear_backtest_outputs(error_message or "<p>Test request is invalid.</p>")
             return False
         pair = request["pair"]
+        algorithm = request["algorithm"]
         timeframe = request["timeframe"]
         started_at = request["started_at"]
         ended_at = request["ended_at"]
         assert isinstance(pair, PairSelection)
+        assert isinstance(algorithm, Algorithm)
         assert isinstance(timeframe, Timeframe)
         assert isinstance(started_at, datetime)
         assert isinstance(ended_at, datetime)
@@ -4247,7 +4293,7 @@ if (!targets.length) {
         submitted, busy_message = submit_tester_request(
             request,
             pending_message=(
-                f"<p>Running Distance test for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
+                f"<p>Running <b>{algorithm.value.upper()}</b> test for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
                 f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
             ),
         )
@@ -4271,6 +4317,7 @@ if (!targets.length) {
             return None
         return optimization_signature(
             pair=pair,
+            algorithm=Algorithm(str(algorithm_select.value or Algorithm.DISTANCE.value)),
             timeframe=Timeframe(timeframe_select.value),
             started_at=started_at,
             ended_at=ended_at,
@@ -4291,6 +4338,7 @@ if (!targets.length) {
         labels = [
             ("symbol_1", "symbol 1"),
             ("symbol_2", "symbol 2"),
+            ("algorithm", "algorithm"),
             ("timeframe", "timeframe"),
             ("started_at", "period start"),
             ("ended_at", "period end"),
@@ -4310,7 +4358,26 @@ if (!targets.length) {
                 changed.append(label)
         return changed
 
-    def on_optimization_config_change(_attr: str, _old: object, _new: object) -> None:
+    def clear_debounced_callback(key: str) -> None:
+        handle = debounced_callback_handles.get(key)
+        if handle is None:
+            return
+        try:
+            doc.remove_timeout_callback(handle)
+        except Exception:
+            pass
+        debounced_callback_handles[key] = None
+
+    def schedule_debounced_callback(key: str, callback, *, delay_ms: int = 500) -> None:
+        clear_debounced_callback(key)
+
+        def run_callback() -> None:
+            debounced_callback_handles[key] = None
+            callback()
+
+        debounced_callback_handles[key] = doc.add_timeout_callback(run_callback, delay_ms)
+
+    def _apply_optimization_config_change() -> None:
         if suppress_optimization_config_change:
             return
         tester_started_at = _coerce_datetime(period_slider.value[0])
@@ -4335,6 +4402,14 @@ if (!targets.length) {
             f"Current target period: <b>{current_started}</b> .. <b>{current_ended}</b>. "
             f"Run Optimization again to refresh the table for the current settings.</p>"
         )
+
+    def on_optimization_config_change(_attr: str, _old: object, _new: object) -> None:
+        _apply_optimization_config_change()
+
+    def on_optimization_config_change_debounced(_attr: str, _old: object, _new: object) -> None:
+        if suppress_optimization_config_change:
+            return
+        schedule_debounced_callback("optimization_config", _apply_optimization_config_change)
 
     def reset_scan_button() -> None:
         scan_run_button.label = "Run Johansen Scan"
@@ -5154,7 +5229,7 @@ if (!targets.length) {
                         cagr_to_ulcer=None,
                         r_squared=None,
                         calmar=None,
-                        beauty_score=None,
+                        hurst_exponent=None,
                         status="no_data",
                     )
                     continue
@@ -5197,7 +5272,7 @@ if (!targets.length) {
                         cagr_to_ulcer=None,
                         r_squared=None,
                         calmar=None,
-                        beauty_score=None,
+                        hurst_exponent=None,
                         status="no_data",
                     )
                     continue
@@ -5267,8 +5342,8 @@ if (!targets.length) {
                     cagr=float(summary.get("cagr", 0.0) or 0.0),
                     cagr_to_ulcer=float(summary.get("cagr_to_ulcer", 0.0) or 0.0),
                     r_squared=float(summary.get("r_squared", 0.0) or 0.0),
+                    hurst_exponent=float(summary.get("hurst_exponent", 0.0) or 0.0),
                     calmar=float(summary.get("calmar", 0.0) or 0.0),
-                    beauty_score=float(summary.get("beauty_score", 0.0) or 0.0),
                     status="ok",
                 )
         finally:
@@ -5814,7 +5889,7 @@ if (!targets.length) {
             return
         load_saved_meta_selector_result, _run_meta_selector = _meta_selector_runtime()
         model_type = str(meta_model_select.value or "")
-        current_objective_metric = str(meta_objective_select.value or wfa_objective_select.value or "score_log_trades")
+        current_objective_metric = str(meta_objective_select.value or wfa_objective_select.value or OBJECTIVE_OPTIONS[0])
         current_oos_started_at = read_meta_oos_started_at()
         current_model_config = normalized_model_config(model_type, build_meta_model_config())
         keep_displayed = can_keep_displayed_meta_result(pair, model_type)
@@ -5904,7 +5979,8 @@ if (!targets.length) {
             return
         lookback_units = int(_read_spinner_value(wfa_lookback_input, 8, cast=int))
         test_units = int(_read_spinner_value(wfa_test_input, 2, cast=int))
-        objective_metric = str(wfa_objective_select.value or "score_log_trades")
+        objective_metric = str(wfa_objective_select.value or OBJECTIVE_OPTIONS[0])
+        algorithm_value = str(wfa_algorithm_select.value or Algorithm.DISTANCE.value)
         snapshot = load_wfa_run_snapshot(
             broker=broker,
             pair=pair,
@@ -5916,6 +5992,7 @@ if (!targets.length) {
             step_units=test_units,
             unit=WfaWindowUnit(wfa_unit_select.value),
             objective_metric=objective_metric,
+            algorithm=algorithm_value,
         )
         if snapshot is None:
             wfa_table_source.data = empty_wfa_table_data()
@@ -5929,7 +6006,7 @@ if (!targets.length) {
             if show_message and wfa_body.visible:
                 wfa_status_div.text = (
                     f"<p>No saved WFA result for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on "
-                    f"<b>{timeframe_select.value}</b> with objective <b>{objective_metric}</b> and the selected WFA settings.</p>"
+                    f"<b>{timeframe_select.value}</b> with algorithm <b>{algorithm_value}</b>, objective <b>{objective_metric}</b> and the selected WFA settings.</p>"
                 )
             return
         apply_wfa_snapshot(snapshot, final=True)
@@ -5938,6 +6015,7 @@ if (!targets.length) {
         if show_message:
             wfa_status_div.text = (
                 f"<p>Loaded saved WFA result for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
+                f"Algorithm: <b>{snapshot.get('algorithm') or algorithm_value}</b>, "
                 f"Objective: <b>{snapshot.get('objective_metric') or objective_metric}</b>, "
                 f"folds: <b>{int(snapshot.get('fold_count', 0) or 0)}</b>, stitched net: "
                 f"<b>{float(snapshot.get('total_net_profit', 0.0) or 0.0):.2f}</b>.</p>"
@@ -5962,9 +6040,10 @@ if (!targets.length) {
         stitched_net = float(result.get("total_net_profit", 0.0) or 0.0)
         stitched_trades = int(result.get("total_trades", 0) or 0)
         history_rows = int(result.get("optimization_history_rows", 0) or 0)
+        algorithm_label = str(result.get("algorithm") or wfa_algorithm_select.value or Algorithm.DISTANCE.value)
         wfa_status_div.text = (
             f"<p>WFA live update: <b>{completed_folds}</b> / <b>{total}</b> folds ready. "
-            f"Current stitched net: <b>{stitched_net:.2f}</b>, trades: <b>{stitched_trades}</b>, optimization rows: <b>{history_rows}</b>.</p>"
+            f"Algorithm: <b>{algorithm_label}</b>. Current stitched net: <b>{stitched_net:.2f}</b>, trades: <b>{stitched_trades}</b>, optimization rows: <b>{history_rows}</b>.</p>"
         )
 
     def render_wfa_progress() -> None:
@@ -6017,7 +6096,8 @@ if (!targets.length) {
             return
         wfa_status_div.text = (
             f"<p>WFA completed for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
-            f"Objective: <b>{result.get('objective_metric') or 'score_log_trades'}</b>, "
+            f"Algorithm: <b>{result.get('algorithm') or wfa_algorithm_select.value or Algorithm.DISTANCE.value}</b>, "
+            f"Objective: <b>{result.get('objective_metric') or OBJECTIVE_OPTIONS[0]}</b>, "
             f"Folds: <b>{int(result.get('fold_count', 0) or 0)}</b>, "
             f"stitched net: <b>{float(result.get('total_net_profit', 0.0) or 0.0):.2f}</b>, "
             f"trades: <b>{int(result.get('total_trades', 0) or 0)}</b>, "
@@ -6032,6 +6112,7 @@ if (!targets.length) {
         started_at: datetime,
         ended_at: datetime,
         defaults: StrategyDefaults,
+        algorithm: Algorithm,
         lookback_units: int,
         test_units: int,
         unit_value: str,
@@ -6057,6 +6138,7 @@ if (!targets.length) {
             test_units=test_units,
             step_units=test_units,
             unit=WfaWindowUnit(unit_value),
+            algorithm=algorithm,
             parallel_workers=parallel_workers,
             history_top_k=wfa_history_top_k,
             cancel_check=cancel_check,
@@ -6127,7 +6209,8 @@ if (!targets.length) {
         lookback_units = int(_read_spinner_value(wfa_lookback_input, 8, cast=int))
         test_units = int(_read_spinner_value(wfa_test_input, 2, cast=int))
         wfa_workers = int(_read_spinner_value(wfa_workers_input, optimizer_parallel_workers, cast=int))
-        objective_metric = str(wfa_objective_select.value or "score_log_trades")
+        objective_metric = str(wfa_objective_select.value or OBJECTIVE_OPTIONS[0])
+        algorithm = Algorithm(str(wfa_algorithm_select.value or Algorithm.DISTANCE.value))
         if lookback_units <= 0 or test_units <= 0 or wfa_workers <= 0:
             wfa_status_div.text = "<p>Lookback, Test and Workers must be positive integers.</p>"
             return
@@ -6150,7 +6233,7 @@ if (!targets.length) {
         wfa_status_div.text = (
             f"<p>Running WFA for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{started_at:%Y-%m-%d %H:%M}</b> .. "
             f"<b>{ended_at:%Y-%m-%d %H:%M} UTC</b> with lookback <b>{lookback_units}</b> {wfa_unit_select.value} and test <b>{test_units}</b> {wfa_unit_select.value}."
-            f" Objective: <b>{objective_metric}</b>. Workers: <b>{wfa_workers}</b>.</p>"
+            f" Algorithm: <b>{algorithm.value}</b>. Objective: <b>{objective_metric}</b>. Workers: <b>{wfa_workers}</b>.</p>"
         )
         wfa_future = wfa_executor.submit(
             lambda: (
@@ -6160,6 +6243,7 @@ if (!targets.length) {
                     started_at,
                     ended_at,
                     build_defaults(),
+                    algorithm,
                     lookback_units,
                     test_units,
                     wfa_unit_select.value,
@@ -6333,7 +6417,7 @@ if (!targets.length) {
             return
         model_config = build_meta_model_config()
         oos_started_at = read_meta_oos_started_at()
-        objective_metric = str(meta_objective_select.value or wfa_objective_select.value or "score_log_trades")
+        objective_metric = str(meta_objective_select.value or wfa_objective_select.value or OBJECTIVE_OPTIONS[0])
         oos_label = "full history" if oos_started_at is None else f"{oos_started_at:%Y-%m-%d}"
         mark_meta_running()
         meta_status_div.text = (
@@ -6632,28 +6716,38 @@ if (!targets.length) {
 
     def on_bybit_fee_mode_change(_attr: str, _old: object, new: object) -> None:
         sync_bybit_fee_mode()
-        on_optimization_config_change(_attr, _old, new)
+        on_optimization_config_change_debounced(_attr, _old, new)
         summary_div.text = f"<p>Bybit fee mode set to <b>{new}</b>. Next test and optimization runs will use this commission model.</p>"
+
+    def on_algorithm_change(_attr: str, old: object, new: object) -> None:
+        on_optimization_config_change_debounced(_attr, old, new)
+        summary_div.text = f"<p>Tester/optimizer algorithm set to <b>{new}</b>.</p>"
 
     def on_optimization_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_optimization_mode_ui()
-        on_optimization_config_change(_attr, _old, _new)
+        on_optimization_config_change_debounced(_attr, _old, _new)
 
     def on_stop_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_stop_mode_ui()
 
     def on_opt_stop_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_optimization_mode_ui()
-        on_optimization_config_change(_attr, _old, _new)
+        on_optimization_config_change_debounced(_attr, _old, _new)
 
     def on_optimization_range_mode_change(_attr: str, _old: object, _new: object) -> None:
         sync_optimization_mode_ui()
-        on_optimization_config_change(_attr, _old, _new)
+        on_optimization_config_change_debounced(_attr, _old, _new)
 
-    def on_display_settings_change(_attr: str, _old: object, _new: object) -> None:
+    def _apply_display_settings_change() -> None:
         apply_plot_display_settings()
         rebalance_layout()
         refresh_plot_ranges()
+
+    def on_display_settings_change(_attr: str, _old: object, _new: object) -> None:
+        _apply_display_settings_change()
+
+    def on_display_settings_change_debounced(_attr: str, _old: object, _new: object) -> None:
+        schedule_debounced_callback("display_settings", _apply_display_settings_change)
 
     def on_meta_config_change(_attr: str, _old: object, _new: object) -> None:
         restore_saved_meta_result(show_message=False)
@@ -6864,10 +6958,12 @@ if (!targets.length) {
             return
 
         pair = request["pair"]
+        algorithm = request["algorithm"]
         timeframe = request["timeframe"]
         started_at = request["started_at"]
         ended_at = request["ended_at"]
         assert isinstance(pair, PairSelection)
+        assert isinstance(algorithm, Algorithm)
         assert isinstance(timeframe, Timeframe)
         assert isinstance(started_at, datetime)
         assert isinstance(ended_at, datetime)
@@ -6875,15 +6971,16 @@ if (!targets.length) {
         submitted, busy_message = submit_tester_request(
             request,
             pending_message=(
-                f"<p>Running Distance test for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
+                f"<p>Running <b>{algorithm.value.upper()}</b> test for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b> on <b>{timeframe.value}</b>. "
                 f"Test period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>.</p>"
             ),
         )
         if not submitted:
-            summary_div.text = busy_message or "<p>Distance test is already running.</p>"
+            summary_div.text = busy_message or f"<p>{algorithm.value.upper()} test is already running.</p>"
 
     def run_optimization_job(
         mode_value: str,
+        algorithm: Algorithm,
         pair: PairSelection,
         timeframe: Timeframe,
         started_at: datetime,
@@ -6898,8 +6995,10 @@ if (!targets.length) {
         optimization_progress["completed"] = 0
         optimization_progress["total"] = 0
         optimization_progress["stage"] = "Preparing optimization"
+        optimize_genetic_fn = optimize_distance_genetic if algorithm == Algorithm.DISTANCE else optimize_ols_genetic
+        optimize_grid_fn = optimize_distance_grid if algorithm == Algorithm.DISTANCE else optimize_ols_grid
         if mode_value == OptimizationMode.GENETIC.value:
-            result = optimize_distance_genetic(
+            result = optimize_genetic_fn(
                 broker=broker,
                 pair=pair,
                 timeframe=timeframe,
@@ -6909,6 +7008,7 @@ if (!targets.length) {
                 search_space=search_space,
                 objective_metric=objective_metric,
                 config=config,
+                algorithm=algorithm,
                 cancel_check=cancel_check,
                 parallel_workers=optimizer_parallel_workers,
                 progress_callback=update_optimization_progress,
@@ -6917,7 +7017,7 @@ if (!targets.length) {
         if mode_value != OptimizationMode.GRID.value:
             raise ValueError(f"Unsupported optimization mode: {mode_value}")
 
-        result = optimize_distance_grid(
+        result = optimize_grid_fn(
             broker=broker,
             pair=pair,
             timeframe=timeframe,
@@ -6926,6 +7026,7 @@ if (!targets.length) {
             defaults=defaults,
             search_space=search_space,
             objective_metric=objective_metric,
+            algorithm=algorithm,
             cancel_check=cancel_check,
             parallel_workers=optimizer_parallel_workers,
             progress_callback=update_optimization_progress,
@@ -6965,6 +7066,8 @@ if (!targets.length) {
 
     def on_run_optimization() -> None:
         nonlocal optimization_future, optimization_poll_callback, optimization_request_context
+        clear_debounced_callback("optimization_config")
+        _apply_optimization_config_change()
         if scanner_is_running():
             optimization_status_div.text = scanner_busy_message("running Optimization")
             return
@@ -6981,8 +7084,9 @@ if (!targets.length) {
         if optimization_future is not None and optimization_future.done():
             poll_optimization_future()
 
-        if algorithm_select.value != "distance":
-            optimization_status_div.text = "<p>Only Distance optimization is wired right now.</p>"
+        algorithm_value = str(algorithm_select.value or Algorithm.DISTANCE.value)
+        if algorithm_value not in {Algorithm.DISTANCE.value, Algorithm.OLS.value}:
+            optimization_status_div.text = "<p>Only Distance and OLS optimization are wired right now.</p>"
             return
 
         pair = current_pair()
@@ -6998,6 +7102,7 @@ if (!targets.length) {
         search_space = optimization_search_space()
         defaults = build_defaults()
         timeframe = Timeframe(timeframe_select.value)
+        algorithm = Algorithm(algorithm_value)
         mode_value = str(optimization_mode_select.value or "")
         if mode_value not in OPTIMIZATION_MODE_OPTIONS:
             optimization_status_div.text = f"<p>Unsupported optimization mode selected: <b>{mode_value or 'empty'}</b>.</p>"
@@ -7009,6 +7114,7 @@ if (!targets.length) {
             "ended_at": ended_at,
             "signature": optimization_signature(
                 pair=pair,
+                algorithm=algorithm,
                 timeframe=timeframe,
                 started_at=started_at,
                 ended_at=ended_at,
@@ -7042,13 +7148,14 @@ if (!targets.length) {
             auto_target = max(1, int(_read_spinner_value(auto_grid_trials_input, 500, cast=int)))
             auto_suffix = f" Auto target: <b>{auto_target}</b>."
         optimization_status_div.text = (
-            f"<p>Running {mode_label} optimization for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
+            f"<p>Running {algorithm.value.upper()} {mode_label} optimization for <b>{pair.symbol_1}</b> / <b>{pair.symbol_2}</b>. "
             f"Optimization period: <b>{started_at:%Y-%m-%d %H:%M}</b> .. <b>{ended_at:%Y-%m-%d %H:%M} UTC</b>. "
             f"Valid combinations: {valid_trial_count}.{auto_suffix} Workers: <b>{optimizer_parallel_workers}</b>. Click the button again to stop.</p>"
         )
         optimization_future = optimization_executor.submit(
             run_optimization_job,
             mode_value,
+            algorithm,
             pair,
             timeframe,
             started_at,
@@ -7894,6 +8001,8 @@ if (!targets.length) {
 
     def on_reset_defaults() -> None:
         nonlocal scanner_request_context
+        clear_debounced_callback("optimization_config")
+        clear_debounced_callback("display_settings")
         if optimization_future is not None and not optimization_future.done():
             optimization_cancel_event.set()
             mark_optimization_running(stopping=True)
@@ -7976,13 +8085,14 @@ if (!targets.length) {
         plot_height_three_input.value = 320
         plot_height_four_input.value = 260
         wfa_period_slider.value = (_ui_datetime(history_start), _ui_datetime(now_utc))
-        wfa_objective_select.value = "score_log_trades"
+        wfa_algorithm_select.value = Algorithm.DISTANCE.value
+        wfa_objective_select.value = OBJECTIVE_OPTIONS[0]
         wfa_unit_select.value = WfaWindowUnit.WEEKS.value
         wfa_lookback_input.value = 8
         wfa_test_input.value = 2
         wfa_workers_input.value = optimizer_parallel_workers
         meta_model_select.value = default_meta_model()
-        meta_objective_select.value = str(wfa_objective_select.value or "score_log_trades")
+        meta_objective_select.value = str(wfa_objective_select.value or OBJECTIVE_OPTIONS[0])
         meta_oos_start_picker.value = default_meta_oos_date.date().isoformat()
         meta_tree_max_depth_input.value = 5
         meta_tree_min_samples_leaf_input.value = 6
@@ -8063,6 +8173,8 @@ if (!targets.length) {
         clear_download_poll_callback()
         clear_wfa_poll_callback()
         clear_meta_poll_callback()
+        clear_debounced_callback("optimization_config")
+        clear_debounced_callback("display_settings")
         optimization_executor.shutdown(wait=False, cancel_futures=True)
         scan_executor.shutdown(wait=False, cancel_futures=True)
         scanner_executor.shutdown(wait=False, cancel_futures=True)
@@ -8088,34 +8200,35 @@ if (!targets.length) {
     download_group_select.on_change("value", on_download_group_change)
     download_scope_select.on_change("value", on_download_scope_change)
     bybit_fee_mode_select.on_change("value", on_bybit_fee_mode_change)
-    capital_input.on_change("value", on_optimization_config_change)
-    leverage_input.on_change("value", on_optimization_config_change)
-    margin_budget_input.on_change("value", on_optimization_config_change)
-    slippage_input.on_change("value", on_optimization_config_change)
+    algorithm_select.on_change("value", on_algorithm_change)
+    capital_input.on_change("value", on_optimization_config_change_debounced)
+    leverage_input.on_change("value", on_optimization_config_change_debounced)
+    margin_budget_input.on_change("value", on_optimization_config_change_debounced)
+    slippage_input.on_change("value", on_optimization_config_change_debounced)
     stop_mode_select.on_change("value", on_stop_mode_change)
     optimization_mode_select.on_change("value", on_optimization_mode_change)
     optimization_range_mode_select.on_change("value", on_optimization_range_mode_change)
     opt_stop_mode_select.on_change("value", on_opt_stop_mode_change)
-    optimization_period_slider.on_change("value", on_optimization_config_change)
-    optimization_objective_select.on_change("value", on_optimization_config_change)
-    auto_grid_trials_input.on_change("value", on_optimization_config_change)
-    opt_lookback_start.on_change("value", on_optimization_config_change)
-    opt_lookback_stop.on_change("value", on_optimization_config_change)
-    opt_lookback_step.on_change("value", on_optimization_config_change)
-    opt_entry_start.on_change("value", on_optimization_config_change)
-    opt_entry_stop.on_change("value", on_optimization_config_change)
-    opt_entry_step.on_change("value", on_optimization_config_change)
-    opt_exit_start.on_change("value", on_optimization_config_change)
-    opt_exit_stop.on_change("value", on_optimization_config_change)
-    opt_exit_step.on_change("value", on_optimization_config_change)
-    opt_stop_start.on_change("value", on_optimization_config_change)
-    opt_stop_stop.on_change("value", on_optimization_config_change)
-    opt_stop_step.on_change("value", on_optimization_config_change)
-    genetic_population_input.on_change("value", on_optimization_config_change)
-    genetic_generations_input.on_change("value", on_optimization_config_change)
-    genetic_elite_input.on_change("value", on_optimization_config_change)
-    genetic_mutation_input.on_change("value", on_optimization_config_change)
-    genetic_seed_input.on_change("value", on_optimization_config_change)
+    optimization_period_slider.on_change("value", on_optimization_config_change_debounced)
+    optimization_objective_select.on_change("value", on_optimization_config_change_debounced)
+    auto_grid_trials_input.on_change("value", on_optimization_config_change_debounced)
+    opt_lookback_start.on_change("value", on_optimization_config_change_debounced)
+    opt_lookback_stop.on_change("value", on_optimization_config_change_debounced)
+    opt_lookback_step.on_change("value", on_optimization_config_change_debounced)
+    opt_entry_start.on_change("value", on_optimization_config_change_debounced)
+    opt_entry_stop.on_change("value", on_optimization_config_change_debounced)
+    opt_entry_step.on_change("value", on_optimization_config_change_debounced)
+    opt_exit_start.on_change("value", on_optimization_config_change_debounced)
+    opt_exit_stop.on_change("value", on_optimization_config_change_debounced)
+    opt_exit_step.on_change("value", on_optimization_config_change_debounced)
+    opt_stop_start.on_change("value", on_optimization_config_change_debounced)
+    opt_stop_stop.on_change("value", on_optimization_config_change_debounced)
+    opt_stop_step.on_change("value", on_optimization_config_change_debounced)
+    genetic_population_input.on_change("value", on_optimization_config_change_debounced)
+    genetic_generations_input.on_change("value", on_optimization_config_change_debounced)
+    genetic_elite_input.on_change("value", on_optimization_config_change_debounced)
+    genetic_mutation_input.on_change("value", on_optimization_config_change_debounced)
+    genetic_seed_input.on_change("value", on_optimization_config_change_debounced)
     meta_model_select.on_change("value", lambda _attr, _old, _new: sync_meta_model_ui())
     meta_model_select.on_change("value", on_meta_config_change)
     meta_objective_select.on_change("value", on_meta_config_change)
@@ -8135,10 +8248,11 @@ if (!targets.length) {
     def sync_meta_objective_with_wfa(_attr: str, old: object, new: object) -> None:
         current_meta_objective = str(meta_objective_select.value or "")
         previous_wfa_objective = str(old or "")
-        next_wfa_objective = str(new or "score_log_trades")
+        next_wfa_objective = str(new or OBJECTIVE_OPTIONS[0])
         if current_meta_objective in ("", previous_wfa_objective):
             meta_objective_select.value = next_wfa_objective
     wfa_period_slider.on_change("value", on_wfa_config_change)
+    wfa_algorithm_select.on_change("value", on_wfa_config_change)
     wfa_objective_select.on_change("value", sync_meta_objective_with_wfa)
     wfa_objective_select.on_change("value", on_wfa_config_change)
     wfa_unit_select.on_change("value", on_wfa_config_change)
@@ -8147,9 +8261,7 @@ if (!targets.length) {
     portfolio_period_slider.on_change("value", on_portfolio_period_change)
     portfolio_allocation_select.on_change("value", on_portfolio_allocation_change)
     for display_widget in [plot_font_size_input, plot_height_single_input, plot_height_two_input, plot_height_three_input, plot_height_four_input]:
-        display_widget.on_change("value", on_display_settings_change)
-        if "value_throttled" in display_widget.properties():
-            display_widget.on_change("value_throttled", on_display_settings_change)
+        display_widget.on_change("value", on_display_settings_change_debounced)
     for key, _plot, _source, _columns, body, toggle in plot_bindings:
         toggle.on_click(build_section_toggle_handler(key, body, toggle))
         body.on_change("visible", on_section_visibility_change)

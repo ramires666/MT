@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import os
@@ -107,11 +107,17 @@ def write_job_manifest(common_root: Path, jobs: list[ExportJob]) -> Path:
     codex_dir = codex_root(common_root)
     codex_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = codex_dir / "history_job.txt"
+    status_file = codex_dir / "history_status.txt"
+    if status_file.exists():
+        try:
+            status_file.unlink()
+        except OSError:
+            pass
     lines = [
         f"{job.symbol}|{job.timeframe}|{job.started_at.strftime('%Y.%m.%d %H:%M:%S')}|{job.ended_at.strftime('%Y.%m.%d %H:%M:%S')}|Codex\\exports\\{job.output_name}"
         for job in jobs
     ]
-    manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-16")
+    manifest_path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-16", newline="")
     return manifest_path
 
 
@@ -127,8 +133,48 @@ def write_startup_config(config_path: Path, chart_symbol: str, script_name: str 
     return config_path
 
 
+def _windows_path_string(path: Path) -> str:
+    if os.name != "nt":
+        try:
+            import subprocess
+            return subprocess.check_output(["wslpath", "-w", str(path)], text=True).strip()
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+    return str(path)
+
+
+def _kill_terminal_if_running(terminal_path: Path) -> None:
+    """Kill any existing MT5 terminal process so that the next launch reads /config: properly.
+
+    When an MT5 instance is already running, launching the exe again simply
+    activates the existing window and returns immediately without applying
+    the /config: argument.  We must terminate the old process first.
+    """
+    exe_name = terminal_path.name  # e.g. "terminal64.exe"
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/IM", exe_name], check=False, capture_output=True)
+    else:
+        # In WSL call the Windows taskkill via PowerShell
+        try:
+            subprocess.run(
+                ["powershell.exe", "-Command", f"Stop-Process -Name '{exe_name[:-4]}' -Force -ErrorAction SilentlyContinue"],
+                check=False,
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            pass
+    # Give the OS time to fully release the process and any file locks
+    import time
+    time.sleep(3)
+
+
 def run_terminal_export(terminal_path: Path, config_path: Path) -> int:
-    completed = subprocess.run([str(coerce_platform_path(terminal_path)), f"/config:{config_path}"], check=False)
+    _kill_terminal_if_running(terminal_path)
+    win_config = _windows_path_string(config_path)
+    completed = subprocess.run(
+        [str(coerce_platform_path(terminal_path)), f"/config:{win_config}"],
+        check=False,
+    )
     return completed.returncode
 
 

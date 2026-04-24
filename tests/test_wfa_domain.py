@@ -80,7 +80,7 @@ def test_run_wfa_request_rejects_non_distance() -> None:
     try:
         run_wfa_request("bybit_mt5", request)
     except ValueError as exc:
-        assert "Only distance WFA" in str(exc)
+        assert "Only distance and OLS WFA" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("Expected ValueError for non-distance WFA")
 

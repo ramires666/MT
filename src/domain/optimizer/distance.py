@@ -15,7 +15,7 @@ from domain.backtest.distance import (
     prepare_distance_backtest_context,
     run_distance_backtest_metrics_frame,
 )
-from domain.contracts import PairSelection, StrategyDefaults, Timeframe
+from domain.contracts import Algorithm, PairSelection, StrategyDefaults, Timeframe
 from domain.data.io import load_instrument_spec
 from domain.optimizer.distance_genetic_core import (
     crossover_candidates as _crossover_candidates,
@@ -51,6 +51,14 @@ from domain.optimizer.distance_parallel import (
 from workers.executor import shared_process_pool
 
 
+def _normalize_algorithm_name(algorithm: str | Algorithm | None) -> str:
+    raw_value = getattr(algorithm, "value", algorithm)
+    normalized = str(raw_value or Algorithm.DISTANCE.value).strip().lower()
+    if normalized not in {Algorithm.DISTANCE.value, Algorithm.OLS.value}:
+        raise ValueError(f"Unsupported optimization algorithm: {normalized}")
+    return normalized
+
+
 def _evaluate_params(
     trial_id: int,
     frame: pl.DataFrame,
@@ -65,6 +73,7 @@ def _evaluate_params(
     spec_1: Mapping[str, Any] | None = None,
     spec_2: Mapping[str, Any] | None = None,
     context=None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> DistanceOptimizationRow:
     metrics = run_distance_backtest_metrics_frame(
         frame=frame,
@@ -78,6 +87,7 @@ def _evaluate_params(
         spec_1=spec_1,
         spec_2=spec_2,
         context=context,
+        algorithm=algorithm,
     )
     return DistanceOptimizationRow(
         trial_id=trial_id,
@@ -89,14 +99,13 @@ def _evaluate_params(
         pnl_to_maxdd=float(metrics["pnl_to_maxdd"]),
         omega_ratio=float(metrics["omega_ratio"]),
         k_ratio=float(metrics["k_ratio"]),
-        score_log_trades=float(metrics["score_log_trades"]),
         ulcer_index=float(metrics["ulcer_index"]),
         ulcer_performance=float(metrics["ulcer_performance"]),
         cagr=float(metrics["cagr"]),
         cagr_to_ulcer=float(metrics["cagr_to_ulcer"]),
         r_squared=float(metrics["r_squared"]),
+        hurst_exponent=float(metrics["hurst_exponent"]),
         calmar=float(metrics["calmar"]),
-        beauty_score=float(metrics["beauty_score"]),
         trades=int(metrics.get("trades", 0) or 0),
         win_rate=float(metrics.get("win_rate", 0.0) or 0.0),
         lookback_bars=params.lookback_bars,
@@ -110,6 +119,16 @@ def _evaluate_params(
         commission_cost=float(metrics["commission_cost"]),
         total_cost=float(metrics["total_cost"]),
     )
+
+
+def _evaluate_distance_params(**kwargs) -> DistanceOptimizationRow:
+    kwargs["algorithm"] = Algorithm.DISTANCE
+    return _evaluate_params(**kwargs)
+
+
+def _evaluate_ols_params(**kwargs) -> DistanceOptimizationRow:
+    kwargs["algorithm"] = Algorithm.OLS
+    return _evaluate_params(**kwargs)
 
 
 def _prepare_optimizer_context(
@@ -182,6 +201,7 @@ def _evaluate_params_parallel(
     progress_callback=None,
     progress_stage: str = "Grid search",
     executor: Executor | None = None,
+    evaluate_params_fn=_evaluate_distance_params,
 ):
     return evaluate_distance_tasks(
         tasks=tasks,
@@ -197,7 +217,7 @@ def _evaluate_params_parallel(
         spec_2=spec_2,
         parallel_workers=parallel_workers,
         cancel_check=cancel_check,
-        evaluate_params_fn=_evaluate_params,
+        evaluate_params_fn=evaluate_params_fn,
         prepare_context_fn=_prepare_optimizer_context,
         progress_callback=progress_callback,
         progress_stage=progress_stage,
@@ -224,6 +244,7 @@ def _evaluate_candidate_tasks_parallel(
     progress_stage: str = "Genetic search",
     completed_offset: int = 0,
     executor: Executor | None = None,
+    evaluate_params_fn=_evaluate_distance_params,
 ):
     return evaluate_candidate_distance_tasks(
         tasks=tasks,
@@ -239,7 +260,7 @@ def _evaluate_candidate_tasks_parallel(
         spec_2=spec_2,
         parallel_workers=parallel_workers,
         cancel_check=cancel_check,
-        evaluate_params_fn=_evaluate_params,
+        evaluate_params_fn=evaluate_params_fn,
         prepare_context_fn=_prepare_optimizer_context,
         progress_callback=progress_callback,
         progress_total=progress_total,
@@ -290,6 +311,7 @@ def optimize_distance_grid_frame(
     parallel_workers: int | None = None,
     progress_callback=None,
     parallel_executor: Executor | None = None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> DistanceOptimizationResult:
     managed_executor_context = (
         shared_process_pool(parallel_workers)
@@ -298,6 +320,7 @@ def optimize_distance_grid_frame(
     )
     with managed_executor_context as managed_executor:
         executor = parallel_executor or managed_executor
+        algorithm_name = _normalize_algorithm_name(algorithm)
         _validate_objective_metric(objective_metric)
         if isinstance(search_space, Mapping):
             search_space = parse_distance_search_space(search_space)
@@ -328,6 +351,7 @@ def optimize_distance_grid_frame(
             cancel_check=cancel_check,
             progress_callback=progress_callback,
             executor=executor,
+            evaluate_params_fn=_evaluate_distance_params if algorithm_name == Algorithm.DISTANCE.value else _evaluate_ols_params,
         )
         unique_rows_by_signature = {
             signature_by_trial[int(row.trial_id)]: row
@@ -366,6 +390,7 @@ def optimize_distance_genetic_frame(
     parallel_workers: int | None = None,
     progress_callback=None,
     parallel_executor: Executor | None = None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> DistanceOptimizationResult:
     managed_executor_context = (
         shared_process_pool(parallel_workers)
@@ -374,6 +399,7 @@ def optimize_distance_genetic_frame(
     )
     with managed_executor_context as managed_executor:
         executor = parallel_executor or managed_executor
+        algorithm_name = _normalize_algorithm_name(algorithm)
         _validate_objective_metric(objective_metric)
         if isinstance(search_space, Mapping):
             search_space = parse_distance_search_space(search_space)
@@ -415,6 +441,7 @@ def optimize_distance_genetic_frame(
                 progress_stage=f"Generation {generation + 1}/{config.generations}",
                 progress_total=estimated_total,
                 executor=executor,
+                evaluate_params_fn=_evaluate_distance_params if algorithm_name == Algorithm.DISTANCE.value else _evaluate_ols_params,
             )
             if cancelled:
                 break
@@ -461,6 +488,7 @@ def optimize_distance_genetic_frame(
                 progress_stage="Final population",
                 progress_total=estimated_total,
                 executor=executor,
+                evaluate_params_fn=_evaluate_distance_params if algorithm_name == Algorithm.DISTANCE.value else _evaluate_ols_params,
             )
 
         rows = _sort_rows(list(cache.values()))
@@ -503,6 +531,7 @@ def optimize_distance_grid(
     cancel_check: CancellationCheck | None = None,
     parallel_workers: int | None = None,
     progress_callback=None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> DistanceOptimizationResult:
     frame, spec_1, spec_2, empty_result = _optimize_with_loaded_frame(
         broker=broker,
@@ -529,6 +558,7 @@ def optimize_distance_grid(
         cancel_check=cancel_check,
         parallel_workers=parallel_workers,
         progress_callback=progress_callback,
+        algorithm=algorithm,
     )
 
 
@@ -545,6 +575,7 @@ def optimize_distance_genetic(
     cancel_check: CancellationCheck | None = None,
     parallel_workers: int | None = None,
     progress_callback=None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> DistanceOptimizationResult:
     frame, spec_1, spec_2, empty_result = _optimize_with_loaded_frame(
         broker=broker,
@@ -572,4 +603,5 @@ def optimize_distance_genetic(
         cancel_check=cancel_check,
         parallel_workers=parallel_workers,
         progress_callback=progress_callback,
+        algorithm=algorithm,
     )

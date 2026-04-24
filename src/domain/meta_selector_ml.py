@@ -339,16 +339,16 @@ def rank_parameter_sets(frame: pl.DataFrame, predictions: np.ndarray) -> list[di
             pl.col("test_cagr").mean().alias("actual_test_cagr_mean"),
             pl.col("test_cagr_to_ulcer").mean().alias("actual_test_cagr_to_ulcer_mean"),
             pl.col("test_r_squared").mean().alias("actual_test_r_squared_mean"),
+            pl.col("test_hurst_exponent").mean().alias("actual_test_hurst_mean"),
             pl.col("test_calmar").mean().alias("actual_test_calmar_mean"),
-            pl.col("test_beauty_score").mean().alias("actual_test_beauty_mean"),
             pl.col("test_trades").mean().alias("actual_test_trades_mean"),
             pl.col(train_score_column).mean().alias("train_score_mean"),
             pl.col("train_net_profit").mean().alias("train_net_mean"),
             pl.col("train_cagr").mean().alias("train_cagr_mean"),
             pl.col("train_cagr_to_ulcer").mean().alias("train_cagr_to_ulcer_mean"),
             pl.col("train_r_squared").mean().alias("train_r_squared_mean"),
+            pl.col("train_hurst_exponent").mean().alias("train_hurst_mean"),
             pl.col("train_calmar").mean().alias("train_calmar_mean"),
-            pl.col("train_beauty_score").mean().alias("train_beauty_mean"),
             pl.col("train_pnl_to_maxdd").mean().alias("train_pnl_to_maxdd_mean"),
         )
         .with_columns(
@@ -384,16 +384,16 @@ def rank_parameter_sets(frame: pl.DataFrame, predictions: np.ndarray) -> list[di
                 "actual_test_cagr_mean": float(row.get("actual_test_cagr_mean", 0.0) or 0.0),
                 "actual_test_cagr_to_ulcer_mean": float(row.get("actual_test_cagr_to_ulcer_mean", 0.0) or 0.0),
                 "actual_test_r_squared_mean": float(row.get("actual_test_r_squared_mean", 0.0) or 0.0),
+                "actual_test_hurst_mean": float(row.get("actual_test_hurst_mean", 0.0) or 0.0),
                 "actual_test_calmar_mean": float(row.get("actual_test_calmar_mean", 0.0) or 0.0),
-                "actual_test_beauty_mean": float(row.get("actual_test_beauty_mean", 0.0) or 0.0),
                 "actual_test_trades_mean": float(row.get("actual_test_trades_mean", 0.0) or 0.0),
                 "train_score_mean": float(row.get("train_score_mean", 0.0) or 0.0),
                 "train_net_mean": float(row.get("train_net_mean", 0.0) or 0.0),
                 "train_cagr_mean": float(row.get("train_cagr_mean", 0.0) or 0.0),
                 "train_cagr_to_ulcer_mean": float(row.get("train_cagr_to_ulcer_mean", 0.0) or 0.0),
                 "train_r_squared_mean": float(row.get("train_r_squared_mean", 0.0) or 0.0),
+                "train_hurst_mean": float(row.get("train_hurst_mean", 0.0) or 0.0),
                 "train_calmar_mean": float(row.get("train_calmar_mean", 0.0) or 0.0),
-                "train_beauty_mean": float(row.get("train_beauty_mean", 0.0) or 0.0),
             }
         )
     return rows

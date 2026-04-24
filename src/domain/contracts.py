@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 class Algorithm(StrEnum):
     DISTANCE = "distance"
+    OLS = "ols"
     JOHANSEN = "johansen"
     COPULA = "copula"
 

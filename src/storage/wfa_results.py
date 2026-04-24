@@ -37,6 +37,28 @@ def _objective_suffix(objective_metric: str | None) -> str:
     return f"__obj_{_sanitize_symbol(normalized)}"
 
 
+def _algorithm_suffix(algorithm: str | None) -> str:
+    normalized = (algorithm or "").strip().lower()
+    if not normalized or normalized == "distance":
+        return ""
+    return f"__alg_{_sanitize_symbol(normalized)}"
+
+
+def _normalized_algorithm_name(algorithm: str | None) -> str:
+    normalized = (algorithm or "").strip().lower()
+    return normalized or "distance"
+
+
+def _read_snapshot_payload(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def wfa_pair_history_dir(broker: str, pair: PairSelection, timeframe: Timeframe) -> Path:
     return wfa_root() / broker / timeframe.value / _pair_key(pair)
 
@@ -61,11 +83,12 @@ def wfa_run_snapshot_path(
     step_units: int,
     unit: WfaWindowUnit,
     objective_metric: str | None = None,
+    algorithm: str | None = None,
 ) -> Path:
     filename = (
         f"{_compact_time(started_at)}__{_compact_time(ended_at)}"
         f"__{unit.value}__lb{int(lookback_units)}__test{int(test_units)}__step{int(step_units)}"
-        f"{_objective_suffix(objective_metric)}.json"
+        f"{_objective_suffix(objective_metric)}{_algorithm_suffix(algorithm)}.json"
     )
     return wfa_run_snapshot_dir(broker, pair, timeframe) / filename
 
@@ -112,6 +135,7 @@ def persist_wfa_run_snapshot(
     step_units: int,
     unit: WfaWindowUnit,
     objective_metric: str | None = None,
+    algorithm: str | None = None,
     result: Mapping[str, Any],
 ) -> Path:
     output_path = wfa_run_snapshot_path(
@@ -125,6 +149,7 @@ def persist_wfa_run_snapshot(
         step_units=step_units,
         unit=unit,
         objective_metric=objective_metric,
+        algorithm=algorithm,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(result)
@@ -158,6 +183,7 @@ def load_wfa_run_snapshot(
     step_units: int,
     unit: WfaWindowUnit,
     objective_metric: str | None = None,
+    algorithm: str | None = None,
 ) -> dict[str, Any] | None:
     path = wfa_run_snapshot_path(
         broker,
@@ -170,8 +196,9 @@ def load_wfa_run_snapshot(
         step_units=step_units,
         unit=unit,
         objective_metric=objective_metric,
+        algorithm=algorithm,
     )
-    if not path.exists() and _objective_suffix(objective_metric):
+    if not path.exists() and (_objective_suffix(objective_metric) or _algorithm_suffix(algorithm)):
         legacy_path = wfa_run_snapshot_path(
             broker,
             pair,
@@ -183,10 +210,15 @@ def load_wfa_run_snapshot(
             step_units=step_units,
             unit=unit,
             objective_metric=None,
+            algorithm=None,
         )
-        payload = json.loads(legacy_path.read_text(encoding="utf-8")) if legacy_path.exists() else None
-        if payload is not None and str(payload.get("objective_metric", "") or "") == str(objective_metric or ""):
+        payload = _read_snapshot_payload(legacy_path)
+        if (
+            payload is not None
+            and str(payload.get("objective_metric", "") or "") == str(objective_metric or "")
+            and _normalized_algorithm_name(str(payload.get("algorithm", "") or "")) == _normalized_algorithm_name(algorithm)
+        ):
             return payload
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    return _read_snapshot_payload(path)

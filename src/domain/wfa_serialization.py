@@ -7,8 +7,13 @@ from typing import Any, Mapping, Sequence
 import polars as pl
 
 from domain.backtest.distance import DistanceParameters
-from domain.contracts import PairSelection, StrategyDefaults, Timeframe, WfaWindowUnit
-from domain.optimizer.distance import DistanceOptimizationRow, _evaluate_params_parallel
+from domain.contracts import Algorithm, PairSelection, StrategyDefaults, Timeframe, WfaWindowUnit
+from domain.optimizer.distance import (
+    DistanceOptimizationRow,
+    _evaluate_distance_params,
+    _evaluate_ols_params,
+    _evaluate_params_parallel,
+)
 from domain.wfa_windowing import WalkWindow
 
 
@@ -36,14 +41,13 @@ def serialize_optimization_row(prefix: str, row: DistanceOptimizationRow) -> dic
         f"{prefix}_pnl_to_maxdd": round(float(row.pnl_to_maxdd), 6),
         f"{prefix}_omega_ratio": round(float(row.omega_ratio), 6),
         f"{prefix}_k_ratio": round(float(row.k_ratio), 6),
-        f"{prefix}_score_log_trades": round(float(row.score_log_trades), 6),
         f"{prefix}_ulcer_index": round(float(row.ulcer_index), 6),
         f"{prefix}_ulcer_performance": round(float(row.ulcer_performance), 6),
         f"{prefix}_cagr": round(float(row.cagr), 6),
         f"{prefix}_cagr_to_ulcer": round(float(row.cagr_to_ulcer), 6),
         f"{prefix}_r_squared": round(float(row.r_squared), 6),
+        f"{prefix}_hurst_exponent": round(float(row.hurst_exponent), 6),
         f"{prefix}_calmar": round(float(row.calmar), 6),
-        f"{prefix}_beauty_score": round(float(row.beauty_score), 6),
         f"{prefix}_trades": int(row.trades),
         f"{prefix}_win_rate": round(float(row.win_rate), 6),
         f"{prefix}_gross_profit": round(float(row.gross_profit), 6),
@@ -75,9 +79,11 @@ def build_fold_history_rows(
     history_top_k: int | None = None,
     cancel_check=None,
     parallel_executor: Executor | None = None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> list[dict[str, Any]]:
     if not optimization_rows or test_frame.is_empty():
         return []
+    algorithm_value = str(getattr(algorithm, "value", algorithm or Algorithm.DISTANCE.value))
 
     selected_rows = list(optimization_rows)
     if history_top_k is not None and history_top_k > 0:
@@ -113,6 +119,11 @@ def build_fold_history_rows(
         progress_callback=None,
         progress_stage="WFA test evaluation",
         executor=parallel_executor,
+        evaluate_params_fn=(
+            _evaluate_distance_params
+            if str(getattr(algorithm, "value", algorithm or Algorithm.DISTANCE.value)) == Algorithm.DISTANCE.value
+            else _evaluate_ols_params
+        ),
     )
     test_map = {int(row.trial_id): row for row in test_rows}
     history_rows: list[dict[str, Any]] = []
@@ -126,6 +137,7 @@ def build_fold_history_rows(
                 "created_at": datetime.now(UTC).isoformat(),
                 "broker": broker,
                 "timeframe": timeframe.value,
+                "algorithm": algorithm_value,
                 "symbol_1": pair.symbol_1,
                 "symbol_2": pair.symbol_2,
                 "fold": int(window.index + 1),

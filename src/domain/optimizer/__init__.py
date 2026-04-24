@@ -15,6 +15,12 @@ from domain.optimizer.distance import (
     parse_distance_genetic_config,
     parse_distance_search_space,
 )
+from domain.optimizer.ols import (
+    optimize_ols_genetic,
+    optimize_ols_genetic_frame,
+    optimize_ols_grid,
+    optimize_ols_grid_frame,
+)
 from domain.optimizer.distance_grid import (
     DEFAULT_DISTANCE_GRID,
     DistanceOptimizationResult as LegacyDistanceOptimizationResult,
@@ -40,6 +46,10 @@ __all__ = [
     "optimize_distance_genetic_frame",
     "optimize_distance_grid",
     "optimize_distance_grid_frame",
+    "optimize_ols_genetic",
+    "optimize_ols_genetic_frame",
+    "optimize_ols_grid",
+    "optimize_ols_grid_frame",
     "parse_distance_genetic_config",
     "parse_distance_search_space",
     "run_distance_grid_search",

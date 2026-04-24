@@ -12,14 +12,12 @@ OBJECTIVE_METRICS = (
     "pnl_to_maxdd",
     "omega_ratio",
     "k_ratio",
-    "score_log_trades",
     "ulcer_index",
     "ulcer_performance",
     "cagr",
     "cagr_to_ulcer",
     "r_squared",
     "calmar",
-    "beauty_score",
 )
 
 
@@ -54,14 +52,13 @@ class DistanceOptimizationRow:
     pnl_to_maxdd: float
     omega_ratio: float
     k_ratio: float
-    score_log_trades: float
     ulcer_index: float
     ulcer_performance: float
     cagr: float
     cagr_to_ulcer: float
     r_squared: float
+    hurst_exponent: float
     calmar: float
-    beauty_score: float
     trades: int
     win_rate: float
     lookback_bars: int

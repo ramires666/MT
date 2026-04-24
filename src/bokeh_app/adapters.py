@@ -379,7 +379,6 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         "k_ratio": [],
         "k_ratio_display": [],
         "k_ratio_bg": [],
-        "score_log_trades": [],
         "cagr": [],
         "cagr_display": [],
         "cagr_bg": [],
@@ -389,12 +388,12 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         "r_squared": [],
         "r_squared_display": [],
         "r_squared_bg": [],
+        "hurst_exponent": [],
+        "hurst_exponent_display": [],
+        "hurst_exponent_bg": [],
         "calmar": [],
         "calmar_display": [],
         "calmar_bg": [],
-        "beauty_score": [],
-        "beauty_score_display": [],
-        "beauty_score_bg": [],
         "ulcer_index": [],
         "ulcer_index_display": [],
         "ulcer_index_bg": [],
@@ -422,12 +421,11 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         "pnl_to_maxdd": [],
         "omega_ratio": [],
         "k_ratio": [],
-        "score_log_trades": [],
         "cagr": [],
         "cagr_to_ulcer": [],
         "r_squared": [],
+        "hurst_exponent": [],
         "calmar": [],
-        "beauty_score": [],
         "ulcer_index": [],
         "ulcer_performance": [],
     }
@@ -447,17 +445,16 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         rows["omega_ratio_display"].append(f"{float(row.omega_ratio):.3f}")
         rows["k_ratio"].append(row.k_ratio)
         rows["k_ratio_display"].append(f"{float(row.k_ratio):.3f}")
-        rows["score_log_trades"].append(row.score_log_trades)
         rows["cagr"].append(row.cagr)
         rows["cagr_display"].append(f"{float(row.cagr):.4f}")
         rows["cagr_to_ulcer"].append(row.cagr_to_ulcer)
         rows["cagr_to_ulcer_display"].append(f"{float(row.cagr_to_ulcer):.4f}")
         rows["r_squared"].append(row.r_squared)
         rows["r_squared_display"].append(f"{float(row.r_squared):.4f}")
+        rows["hurst_exponent"].append(row.hurst_exponent)
+        rows["hurst_exponent_display"].append(f"{float(row.hurst_exponent):.4f}")
         rows["calmar"].append(row.calmar)
         rows["calmar_display"].append(f"{float(row.calmar):.4f}")
-        rows["beauty_score"].append(row.beauty_score)
-        rows["beauty_score_display"].append(f"{float(row.beauty_score):.4f}")
         rows["ulcer_index"].append(row.ulcer_index)
         rows["ulcer_index_display"].append(f"{float(row.ulcer_index):.4f}")
         rows["ulcer_performance"].append(row.ulcer_performance)
@@ -481,12 +478,11 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
         metric_values["pnl_to_maxdd"].append(row.pnl_to_maxdd)
         metric_values["omega_ratio"].append(row.omega_ratio)
         metric_values["k_ratio"].append(row.k_ratio)
-        metric_values["score_log_trades"].append(row.score_log_trades)
         metric_values["cagr"].append(row.cagr)
         metric_values["cagr_to_ulcer"].append(row.cagr_to_ulcer)
         metric_values["r_squared"].append(row.r_squared)
+        metric_values["hurst_exponent"].append(row.hurst_exponent)
         metric_values["calmar"].append(row.calmar)
-        metric_values["beauty_score"].append(row.beauty_score)
         metric_values["ulcer_index"].append(row.ulcer_index)
         metric_values["ulcer_performance"].append(row.ulcer_performance)
 
@@ -499,8 +495,8 @@ def optimization_results_to_source(result: DistanceOptimizationResult) -> dict[s
     rows["cagr_bg"] = _soft_metric_backgrounds(metric_values["cagr"], higher_is_better=True)
     rows["cagr_to_ulcer_bg"] = _soft_metric_backgrounds(metric_values["cagr_to_ulcer"], higher_is_better=True)
     rows["r_squared_bg"] = _soft_metric_backgrounds(metric_values["r_squared"], higher_is_better=True)
+    rows["hurst_exponent_bg"] = _soft_metric_backgrounds(metric_values["hurst_exponent"], higher_is_better=True)
     rows["calmar_bg"] = _soft_metric_backgrounds(metric_values["calmar"], higher_is_better=True)
-    rows["beauty_score_bg"] = _soft_metric_backgrounds(metric_values["beauty_score"], higher_is_better=True)
     rows["ulcer_index_bg"] = _soft_metric_backgrounds(metric_values["ulcer_index"], higher_is_better=False)
     rows["ulcer_performance_bg"] = _soft_metric_backgrounds(metric_values["ulcer_performance"], higher_is_better=True)
     return rows

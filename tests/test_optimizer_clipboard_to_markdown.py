@@ -8,8 +8,8 @@ from tools.optimizer_clipboard_to_markdown import (
 
 def test_parse_optimizer_clipboard_tsv_with_header() -> None:
     raw = (
-        "Net\tMax DD\tTrades\tLookback\tOmega\tK\tScore\tEnding\tPnL/DD\tUlcer\tUPI\tEntry Z\tExit Z\tWin\tGross\tSpread\tSlip\tComm\tCosts\n"
-        "248.62\t-366.22\t2\t32\t1.174\t0.118\t0.332\t10248.62\t0.679\t1.4312\t0.174\t2.0\t0.5\t0.500\t271.73\t7.10\t4.01\t12.00\t23.11\n"
+        "Net\tMax DD\tTrades\tLookback\tOmega\tK\tCAGR\tCAGR/Ulcer\tR^2\tHurst\tCalmar\tEnding\tPnL/DD\tUlcer\tUPI\tEntry Z\tExit Z\tWin\tGross\tSpread\tSlip\tComm\tCosts\n"
+        "248.62\t-366.22\t2\t32\t1.174\t0.118\t0.2211\t0.1544\t0.9300\t0.6123\t1.4400\t10248.62\t0.679\t1.4312\t0.174\t2.0\t0.5\t0.500\t271.73\t7.10\t4.01\t12.00\t23.11\n"
     )
 
     columns, rows = parse_optimizer_clipboard(raw)
@@ -23,7 +23,11 @@ def test_parse_optimizer_clipboard_tsv_with_header() -> None:
             "Lookback": "32",
             "Omega": "1.174",
             "K": "0.118",
-            "Score": "0.332",
+            "CAGR": "0.2211",
+            "CAGR/Ulcer": "0.1544",
+            "R^2": "0.9300",
+            "Hurst": "0.6123",
+            "Calmar": "1.4400",
             "Ending": "10248.62",
             "PnL/DD": "0.679",
             "Ulcer": "1.4312",
@@ -42,8 +46,8 @@ def test_parse_optimizer_clipboard_tsv_with_header() -> None:
 
 def test_parse_optimizer_clipboard_tsv_without_header_and_stop_z() -> None:
     raw = (
-        "248.62\t-366.22\t2\t32\t1.174\t0.118\t0.332\t10248.62\t0.679\t1.4312\t0.174\t2.0\t0.5\t3.0\t0.500\t271.73\t7.10\t4.01\t12.00\t23.11\n"
-        "120.00\t-100.00\t3\t48\t1.250\t0.145\t0.441\t10120.00\t1.200\t0.9500\t0.221\t1.8\t-1.0\t3.5\t0.667\t150.00\t10.00\t5.00\t15.00\t30.00\n"
+        "248.62\t-366.22\t2\t32\t1.174\t0.118\t0.2211\t0.1544\t0.9300\t0.6123\t1.4400\t10248.62\t0.679\t1.4312\t0.174\t2.0\t0.5\t3.0\t0.500\t271.73\t7.10\t4.01\t12.00\t23.11\n"
+        "120.00\t-100.00\t3\t48\t1.250\t0.145\t0.1900\t0.2100\t0.8800\t0.5600\t1.2000\t10120.00\t1.200\t0.9500\t0.221\t1.8\t-1.0\t3.5\t0.667\t150.00\t10.00\t5.00\t15.00\t30.00\n"
     )
 
     columns, rows = parse_optimizer_clipboard(raw)
@@ -67,8 +71,16 @@ Omega
 1.174
 K
 0.118
-Score
-0.332
+CAGR
+0.2211
+CAGR/Ulcer
+0.1544
+R^2
+0.9300
+Hurst
+0.6123
+Calmar
+1.4400
 Ending
 10248.62
 PnL/DD

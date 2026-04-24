@@ -5,7 +5,7 @@ from typing import Any
 
 
 SUPPORTED_META_MODELS = ("decision_tree", "random_forest", "xgboost")
-DEFAULT_META_TARGET = "test_score_log_trades"
+DEFAULT_META_TARGET = "test_objective_score"
 
 FEATURE_COLUMNS = [
     "lookback_bars",
@@ -21,14 +21,13 @@ FEATURE_COLUMNS = [
     "train_pnl_to_maxdd",
     "train_omega_ratio",
     "train_k_ratio",
-    "train_score_log_trades",
     "train_ulcer_index",
     "train_ulcer_performance",
     "train_cagr",
     "train_cagr_to_ulcer",
     "train_r_squared",
+    "train_hurst_exponent",
     "train_calmar",
-    "train_beauty_score",
     "train_trades",
     "train_win_rate",
     "train_gross_profit",
@@ -49,7 +48,6 @@ PARAMETER_COLUMNS = [
 
 NUMERIC_FILL_COLUMNS = FEATURE_COLUMNS + [
     "test_objective_score",
-    "test_score_log_trades",
     "test_net_profit",
     "test_max_drawdown",
     "test_ending_equity",
@@ -61,8 +59,8 @@ NUMERIC_FILL_COLUMNS = FEATURE_COLUMNS + [
     "test_cagr",
     "test_cagr_to_ulcer",
     "test_r_squared",
+    "test_hurst_exponent",
     "test_calmar",
-    "test_beauty_score",
     "test_trades",
     "test_win_rate",
     "test_total_cost",

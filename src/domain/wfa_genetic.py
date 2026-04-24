@@ -5,9 +5,10 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from domain.backtest.distance import DistanceParameters, load_pair_frame
-from domain.contracts import PairSelection, StrategyDefaults, Timeframe, WfaWindowUnit
+from domain.contracts import Algorithm, PairSelection, StrategyDefaults, Timeframe, WfaWindowUnit
 from domain.data.io import load_instrument_spec
 from domain.optimizer.distance import _objective_score, _validate_objective_metric, optimize_distance_genetic_frame
+from domain.optimizer.ols import optimize_ols_genetic_frame
 from domain.wfa_evaluation import evaluate_distance_params
 from domain.wfa_serialization import build_fold_history_rows, serialize_pair, serialize_time, slice_frame, stitch_pair_oos_equity
 from domain.wfa_windowing import build_train_test_windows
@@ -72,6 +73,7 @@ def run_distance_genetic_wfa(
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: WfaProgressCallback | None = None,
     partial_result_callback: WfaPartialResultCallback | None = None,
+    algorithm: str | Algorithm = Algorithm.DISTANCE,
 ) -> dict[str, Any]:
     _validate_objective_metric(objective_metric)
     effective_step_units = int(step_units or test_units)
@@ -131,6 +133,8 @@ def run_distance_genetic_wfa(
 
     cancelled = False
     normalized_history_top_k = None if history_top_k is None or int(history_top_k) <= 0 else int(history_top_k)
+    algorithm_value = str(getattr(algorithm, "value", algorithm or Algorithm.DISTANCE.value))
+    optimization_fn = optimize_distance_genetic_frame if algorithm_value == Algorithm.DISTANCE.value else optimize_ols_genetic_frame
     with shared_process_pool(parallel_workers) as parallel_executor:
         for position, window in enumerate(windows, start=1):
             if _is_cancelled(cancel_check):
@@ -144,7 +148,7 @@ def run_distance_genetic_wfa(
                 continue
 
             try:
-                optimization = optimize_distance_genetic_frame(
+                optimization = optimization_fn(
                     frame=train_frame,
                     pair=pair,
                     defaults=defaults,
@@ -157,6 +161,7 @@ def run_distance_genetic_wfa(
                     spec_1=spec_1,
                     spec_2=spec_2,
                     config=genetic_config,
+                    algorithm=algorithm,
                     parallel_workers=parallel_workers,
                     cancel_check=cancel_check,
                     parallel_executor=parallel_executor,
@@ -194,6 +199,7 @@ def run_distance_genetic_wfa(
                     history_top_k=normalized_history_top_k,
                     cancel_check=cancel_check,
                     parallel_executor=parallel_executor,
+                    algorithm=algorithm,
                 )
             except Exception:
                 if _is_cancelled(cancel_check):
@@ -224,6 +230,7 @@ def run_distance_genetic_wfa(
                 spec_1=spec_1,
                 spec_2=spec_2,
                 include_result=True,
+                algorithm=algorithm,
             )
             if _is_cancelled(cancel_check):
                 cancelled = True
@@ -249,8 +256,8 @@ def run_distance_genetic_wfa(
                     "train_cagr": round(float(best.cagr), 6),
                     "train_cagr_to_ulcer": round(float(best.cagr_to_ulcer), 6),
                     "train_r_squared": round(float(best.r_squared), 6),
+                    "train_hurst_exponent": round(float(best.hurst_exponent), 6),
                     "train_calmar": round(float(best.calmar), 6),
-                    "train_beauty_score": round(float(best.beauty_score), 6),
                     "test_score": round(float(_objective_score(objective_metric, test_metrics)), 6),
                     "test_net_profit": round(float(test_summary.get("net_pnl", 0.0) or 0.0), 6),
                     "test_ending_equity": round(float(test_summary.get("ending_equity", defaults.initial_capital) or defaults.initial_capital), 6),
@@ -258,8 +265,8 @@ def run_distance_genetic_wfa(
                     "test_cagr": round(float(test_metrics.get("cagr", 0.0) or 0.0), 6),
                     "test_cagr_to_ulcer": round(float(test_metrics.get("cagr_to_ulcer", 0.0) or 0.0), 6),
                     "test_r_squared": round(float(test_metrics.get("r_squared", 0.0) or 0.0), 6),
+                    "test_hurst_exponent": round(float(test_metrics.get("hurst_exponent", 0.0) or 0.0), 6),
                     "test_calmar": round(float(test_metrics.get("calmar", 0.0) or 0.0), 6),
-                    "test_beauty_score": round(float(test_metrics.get("beauty_score", 0.0) or 0.0), 6),
                     "test_trades": int(test_summary.get("trades", 0) or 0),
                     "test_commission": round(float(test_summary.get("total_commission", 0.0) or 0.0), 6),
                     "test_total_cost": round(float(test_summary.get("total_cost", 0.0) or 0.0), 6),
@@ -282,6 +289,7 @@ def run_distance_genetic_wfa(
                         "status": "running",
                         "cancelled": False,
                         "pair": serialize_pair(pair),
+                        "algorithm": algorithm_value,
                         "objective_metric": objective_metric,
                         "wfa_run_id": wfa_run_id,
                         "optimization_history_path": history_path,
@@ -317,6 +325,7 @@ def run_distance_genetic_wfa(
         "status": "cancelled" if cancelled else "completed",
         "cancelled": bool(cancelled),
         "pair": serialize_pair(pair),
+        "algorithm": algorithm_value,
         "objective_metric": objective_metric,
         "wfa_run_id": wfa_run_id,
         "optimization_history_path": history_path,
@@ -352,6 +361,7 @@ def run_distance_genetic_wfa(
             step_units=int(effective_step_units),
             unit=unit,
             objective_metric=objective_metric,
+            algorithm=algorithm_value,
             result=result_payload,
         )
         result_payload["snapshot_path"] = str(snapshot_path)

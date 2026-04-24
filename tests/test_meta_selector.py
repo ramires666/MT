@@ -145,7 +145,7 @@ def test_fit_predict_passes_new_metric_features_to_model(monkeypatch) -> None:
         row["train_cagr_to_ulcer"] = 20.0 + marker
         row["train_r_squared"] = 30.0 + marker
         row["train_calmar"] = 40.0 + marker
-        row["train_beauty_score"] = 50.0 + marker
+        row["train_hurst_exponent"] = 50.0 + marker
         row["test_score_log_trades"] = 0.5 + marker
         return row
 
@@ -181,12 +181,12 @@ def test_fit_predict_passes_new_metric_features_to_model(monkeypatch) -> None:
     assert captured["x_train"][0, feature_index["train_cagr_to_ulcer"]] == 20.0
     assert captured["x_train"][0, feature_index["train_r_squared"]] == 30.0
     assert captured["x_train"][0, feature_index["train_calmar"]] == 40.0
-    assert captured["x_train"][0, feature_index["train_beauty_score"]] == 50.0
+    assert captured["x_train"][0, feature_index["train_hurst_exponent"]] == 50.0
     assert captured["x_score"][0, feature_index["train_cagr"]] == 109.0
     assert captured["x_score"][0, feature_index["train_cagr_to_ulcer"]] == 119.0
     assert captured["x_score"][0, feature_index["train_r_squared"]] == 129.0
     assert captured["x_score"][0, feature_index["train_calmar"]] == 139.0
-    assert captured["x_score"][0, feature_index["train_beauty_score"]] == 149.0
+    assert captured["x_score"][0, feature_index["train_hurst_exponent"]] == 149.0
 
 
 def test_fit_predict_clips_extreme_feature_and_target_values(monkeypatch) -> None:

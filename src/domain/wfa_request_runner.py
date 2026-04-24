@@ -11,8 +11,8 @@ from domain.wfa_windowing import build_walk_windows
 
 
 def run_wfa_request(broker: str, request: WfaRequest) -> dict[str, Any]:
-    if request.algorithm != Algorithm.DISTANCE:
-        raise ValueError("Only distance WFA is implemented right now.")
+    if request.algorithm not in {Algorithm.DISTANCE, Algorithm.OLS}:
+        raise ValueError("Only distance and OLS WFA are implemented right now.")
     _validate_objective_metric(request.objective_metric)
 
     window_search = request.window_search
@@ -80,6 +80,7 @@ def run_wfa_request(broker: str, request: WfaRequest) -> dict[str, Any]:
                             parameter_search_space=request.parameter_search_space,
                             base_frame=base_frames[pair_key],
                             windows=windows,
+                            algorithm=request.algorithm,
                         )
                         if pair_result is None:
                             continue
